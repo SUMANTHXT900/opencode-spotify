@@ -1,0 +1,10 @@
+reference
+node_modules/
+dist/
+*.tgz
+.env
+bridge.json
+*.spotify-backup-*
+*.backup-*
+*.tmp
+opencode.jsonc

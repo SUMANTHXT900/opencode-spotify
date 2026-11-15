@@ -1,0 +1,78 @@
+import type { Capabilities } from "./protocol.ts"
+
+export interface SpotifyState {
+  epoch: string
+  revision: number
+  connection: "disconnected" | "connecting" | "connected" | "error"
+  track: { uri: string; title: string; artist: string; album: string; image: string } | null
+  playback: PlaybackState
+  capabilities: Capabilities | null
+  error: string | null
+  queueRevision: number
+  lyricsRevision: number
+}
+
+export interface PlaybackState {
+  trackUri: string | null
+  isPlaying: boolean | null
+  positionMs: number
+  durationMs: number
+  shuffle: boolean | null
+  repeat: 0 | 1 | 2 | null
+  volume: number | null
+  muted: boolean | null
+  liked: boolean | null
+  updatedAt: number
+}
+
+export const emptyPlayback = (): PlaybackState => ({
+  trackUri: null, isPlaying: null, positionMs: 0, durationMs: 0, shuffle: null,
+  repeat: null, volume: null, muted: null, liked: null, updatedAt: 0,
+})
+
+export function initialState(): SpotifyState {
+  return {
+    epoch: "", revision: 0, queueRevision: 0, lyricsRevision: 0,
+    connection: "disconnected", track: null, playback: emptyPlayback(),
+    capabilities: null, error: null,
+  }
+}
+
+export function connectionLabel(state: SpotifyState) {
+  if (state.connection === "connected") return "● Connected"
+  if (state.connection === "connecting") return "○ Connecting"
+  if (state.connection !== "error") return "○ Waiting for Spotify"
+  if (state.error?.includes("not installed")) return "⚠ Extension not installed"
+  if (state.error?.includes("protocol") || state.error?.includes("update required")) return "⚠ Extension incompatible"
+  if (state.error?.includes("port unavailable")) return "⚠ Local port unavailable"
+  return "⚠ Connection configuration error"
+}
+
+export function reconciledPosition(previous: number, retainedLyricsUri: string | null, next: SpotifyState) {
+  if (next.track && next.playback.trackUri === next.track.uri) return next.playback.positionMs
+  if (next.track && next.track.uri !== retainedLyricsUri || next.connection === "connected" && !next.track) return 0
+  return previous
+}
+
+// `receivedAt` and `now` are monotonic timestamps in the receiving TUI process.
+// Never extrapolate more than ten seconds beyond the last authoritative sample.
+export function positionAt(playback: PlaybackState, receivedAt: number, now: number): number {
+  const elapsed = playback.isPlaying ? Math.max(0, Math.min(10_000, now - receivedAt)) : 0
+  return Math.min(playback.durationMs, Math.max(0, playback.positionMs + elapsed))
+}
+
+export function formatTime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
+}
+
+export function newerSnapshot(current: SpotifyState, next: SpotifyState): boolean {
+  return next.epoch !== current.epoch || next.revision > current.revision
+}
+
+export function progressBar(position: number, duration: number, width: number): string {
+  const size = Math.max(0, Math.floor(width))
+  const fraction = duration > 0 ? Math.max(0, Math.min(1, position / duration)) : 0
+  const filled = Math.floor(fraction * size)
+  return "━".repeat(filled) + "─".repeat(size - filled)
+}
