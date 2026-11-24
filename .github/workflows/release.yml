@@ -21,9 +21,9 @@
 #      at the first published version. Never publish stable `latest` before
 #      physical QA; `latest` additionally requires qa_passed=true here.
 #
-# Artifact integrity: the build job writes a SHA-256 digest file next to the
-# tarball and uploads both; the publish job re-verifies the digest before
-# publishing, so exactly the tarball CI verified is what ships.
+# Artifact integrity: the build job writes SHA-256 and npm-integrity sidecars
+# next to the tarball and uploads both; the publish job re-verifies both
+# digests before publishing, so exactly the tarball CI verified is what ships.
 #
 # Private-repository caveat: this repository is currently private. npm does
 # not support provenance attestations from a private repository, so the
