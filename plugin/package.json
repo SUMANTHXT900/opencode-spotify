@@ -1,7 +1,7 @@
 {
   "name": "opencode-spotify",
-  "version": "0.5.7",
-  "description": "Spotify mini-player for the OpenCode terminal UI",
+  "version": "0.6.0-beta.1",
+  "description": "Spotify playback, synchronized lyrics and album art inside the OpenCode terminal UI",
   "type": "module",
   "license": "MIT",
   "exports": {
@@ -12,14 +12,19 @@
   "files": [
     "src",
     "spicetify",
-    "scripts"
+    "scripts/install-extension.ps1",
+    "bin",
+    "dist",
+    "compat.json"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
     "test:render": "bun --preload @opentui/solid/preload tests/render-layout.tsx",
     "test:artwork": "bun --preload @opentui/solid/preload tests/render-artwork.tsx",
-    "test:vt": "node --test tests/vt-emission.test.ts"
+    "test:vt": "node --test tests/vt-emission.test.ts",
+    "verify:package": "node scripts/verify-package.mjs",
+    "build:cli": "tsc -p tsconfig.cli.json && tsc -p tsconfig.provision.json"
   },
   "dependencies": {
     "@opencode/plugin": "2.3.0",
@@ -37,5 +42,23 @@
   },
   "engines": {
     "node": ">=22.18"
+  },
+  "bin": {
+    "opencode-spotify": "./bin/opencode-spotify.js"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "spotify",
+    "spicetify",
+    "tui",
+    "terminal",
+    "lyrics",
+    "windows"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SUMANTHXT900/opencode-spotify.git",
+    "directory": "plugin"
   }
 }

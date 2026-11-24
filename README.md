@@ -6,10 +6,21 @@ automatically authenticated Spicetify extension.
 TypeScript + TSX + OpenCode RPC. No Python, no native media helper, no OAuth
 app, no separate GUI.
 
-> **V0.5.7 · Private development baseline · Windows**
+Not affiliated with Spotify AB or the OpenCode project. Spotify and OpenCode
+are trademarks of their respective owners. The package name is descriptive.
+
+> **V0.6.0-beta.1 · Distribution implementation · Private · Windows**
 >
-> This project is not published to npm. Build and test from the checkout.
-> V0.5.7 automated checks do not replace live Windows Terminal and audio QA.
+> The player from V0.5.7 is unchanged. V0.6.0-beta.1 adds the global installer,
+> onboarding, update/repair/diagnostics/uninstall commands, npm packaging,
+> and release infrastructure.
+>
+> This project is **not published to npm yet**. All `npx` commands are the
+> post-publication path. Automated verification is complete for the
+> implementation; physical npm-registry installation QA and the release
+> approval are still pending. See
+> [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) and
+> [docs/V0.6.0_RELEASE_NOTES.md](docs/V0.6.0_RELEASE_NOTES.md).
 
 ## What it does
 
@@ -34,15 +45,15 @@ app, no separate GUI.
 
 | Component | Version |
 |-----------|---------|
-| OpenCode | 2.3.0 |
+| OpenCode | ≥ 2.3.0 |
 | OpenTUI | 0.9 |
 | Node.js | CI uses 24.12.0; the package declares ≥ 22.18 |
 | Bun | 1.3.14 in CI; required by the full test suite |
 | PowerShell | `pwsh` is required by the Windows test fixtures |
 | Spotify Desktop + Spicetify CLI | For live use only; not needed to run tests |
 
-The V0.5.7 bridge is **protocol-2 / auto-1**. Do not run two differently
-named copies of the bridge at once.
+The V0.6.0 package uses bridge protocol **2 / auto-1**. Do not run two
+differently named copies of the bridge at once.
 
 ---
 
@@ -55,6 +66,7 @@ Set-Location plugin
 npm ci --ignore-scripts --no-audit
 npm run typecheck
 npm test
+npm run build:cli   # compile the installer CLI before running bin/ or packaging
 ```
 
 The full suite includes native renderer and bridge fixtures. It does not
@@ -124,9 +136,54 @@ pins its actual Origin; later connections must match exactly.
 | `npm run test:vt` | VT emission / width-model harness (Bun) |
 | `npm run test:artwork` | Artwork pipeline checks (Bun) |
 | `npm pack --dry-run` | Packaging check, no publish |
+| `npm run verify:package` | Full tarball check: compiled CLI, pack file-list audit, isolated install, bin `--version`/`--help` |
+| `npm run build:cli` | Compile the installer CLI to `dist/` (required before packaging) |
 | `node --check spicetify/opencode-spotify-bridge.js` | Bridge syntax check |
 | `npm audit --audit-level=high` | Report all advisories; fail on high or critical |
 | `pwsh -NoProfile -File scripts/install-extension.ps1` | Installer inspection only |
+
+---
+
+## Distribution (V0.6.0-beta.1, unpublished)
+
+V0.6.0-beta.1 keeps the V0.5.7 player and adds the npm distribution path. Status:
+**private, not published** — build and verify from the checkout.
+
+Windows prerequisites for install/verify/publish are the same table as
+above (Node ≥ 22.18, OpenCode ≥ 2.3.0, Spicetify ≥ 2.0.0 for live use).
+Full detail lives in [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md); release
+state in [docs/V0.6.0_RELEASE_NOTES.md](docs/V0.6.0_RELEASE_NOTES.md).
+
+After publication, the global registration is one exact-version entry:
+
+```jsonc
+{ "plugins": ["opencode-spotify@0.6.0-beta.1"] }
+```
+
+One entry loads both server and TUI; never pair it with a duplicate local
+path entry. Pin the exact version so plugin and bridge stay coordinated.
+The installer performs this through the native
+`opencode plugin add opencode-spotify@0.6.0-beta.1` command rather than editing
+JSONC by hand.
+
+CLI (available from the checkout via `npm run build:cli`, and after
+publication via `npx`):
+
+| Command | Effect |
+|---------|--------|
+| `setup` (default) | Install or maintain the installation |
+| `status` | Read-only summary (`--json` supported) |
+| `update` | Compatible updates only; never downgrades |
+| `repair` | Fix owned files/registration; reuses the secret |
+| `doctor` | Read-only diagnostics |
+| `uninstall` | Remove registration and bridge; keeps credentials unless `--remove-credentials` |
+
+```powershell
+# Post-publication only — do not run yet:
+npx opencode-spotify@0.6.0-beta.1 setup
+npx opencode-spotify@0.6.0-beta.1 status --json
+npx opencode-spotify@0.6.0-beta.1 update --dry-run
+```
 
 ---
 
@@ -190,6 +247,11 @@ scoped per feature. Timed-out mutations are never retried.
   extensions or a compromised local account could access them. Authorized
   OpenCode clients can control playback. Do not expose OpenCode to untrusted
   clients.
+- This package is not affiliated with Spotify AB or the OpenCode project.
+  `reference/` contains unshipped research material, including an AGPL-3.0
+  project; it is ignored and excluded from the package, and no AGPL source was
+  copied into `src/` or `spicetify/` (MIT licensing applies only to the
+  shipped code). Confirm this provenance before any future reuse.
 
 ---
 
@@ -202,12 +264,14 @@ scoped per feature. Timed-out mutations are never retried.
 | [UI / UX design](docs/UI_UX_DESIGN.md) | Layout, modes, monochrome rules |
 | [Feature matrix](docs/FEATURE_MATRIX.md) | Capability coverage |
 | [Protocol](docs/PROTOCOL.md) | Bridge auth and transport |
-| [Roadmap](docs/ROADMAP.md) | Direction (V0.5.7 scope only; no V0.6 work claimed) |
+| [Roadmap](docs/ROADMAP.md) | Direction (V0.5.7 scope only; V0.6 work is tracked in the release notes) |
+| [Distribution](docs/DISTRIBUTION.md) | V0.6.0 install, update, rollback, verification, and release process |
+| [V0.6.0 release notes](docs/V0.6.0_RELEASE_NOTES.md) | Distribution milestone status: unpublished, verification pending |
 
 ---
 
 ## License
 
-MIT, as declared in `plugin/package.json`. No separate `LICENSE` file is
-shipped in this baseline. Spotify, Spicetify, OpenCode, and OpenTUI retain
-their own terms. Optional lyric providers retain theirs.
+MIT — see `LICENSE` at the repository root (also shipped as `plugin/LICENSE`
+so the packed tarball carries it). Spotify, Spicetify, OpenCode, and OpenTUI
+retain their own terms. Optional lyric providers retain theirs.

@@ -71,7 +71,7 @@ export class LyricsSourceManager {
     try {
       const response = await this.fetcher(url, {
         redirect: "error", signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(6000)]),
-        headers: { "User-Agent": `OpenCodeSpotify/0.5.7 (${contact})`, Accept: "application/json" },
+        headers: { "User-Agent": `OpenCodeSpotify/0.6.0 (${contact})`, Accept: "application/json" },
       })
       if (response.status === 429 || response.status === 503) {
         const header = response.headers.get("Retry-After") ?? ""

@@ -1,0 +1,14 @@
+{
+  "package": "opencode-spotify",
+  "bridge": {
+    "protocol": 2,
+    "handshake": "auto-1",
+    "port": 18765
+  },
+  "minimum": {
+    "opencode": "2.3.0",
+    "spicetify": "2.0.0",
+    "node": "22.18"
+  },
+  "platforms": ["win32"]
+}
