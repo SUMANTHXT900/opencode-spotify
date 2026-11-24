@@ -1,6 +1,51 @@
-# V0.4 security and change report
+# V0.6.0 installer and distribution security
 
-## Audit findings
+## Installer review (V0.6.0)
+
+- Global registration and removal use the native
+  `opencode plugin add/remove` commands with argv arrays. The installer does not
+  hand-edit JSONC, does not modify project configuration, and refuses to guess
+  a successful registration without re-reading it.
+- All child processes use `execFile` with `shell: false`. Windows `.cmd` shims
+  are invoked through `cmd.exe /d /s /c` with quoted, validated arguments;
+  `--package-spec` is restricted to a safe character set. No `iex`,
+  `Invoke-Expression`, or `curl | sh` is used.
+- Every mutating command prints a plan first. `--dry-run` executes no step;
+  noninteractive mutations require `--yes`; `spicetify apply` requires a
+  separate `--apply`/confirmation even after bridge files are approved;
+  credential deletion requires another phrase confirmation.
+- Spicetify detection is read-only and checks PATH plus LOCALAPPDATA, `-c`,
+  owner-specific installation location, and the Store caveat. Automatic
+  installation prefers winget. The fallback downloads the official
+  `spicetify/cli` installer over HTTPS, displays its SHA-256, requires a typed
+  `INSTALL`, runs it with `pwsh -File`, and cleans the temp file. Upgrades use
+  the detected owner and never mix package managers.
+- The bridge installer remains the single implementation. It reuses valid
+  credentials by default, refuses symlinked config/extension paths and
+  ambiguous duplicate `extensions =` keys, preserves unrelated extensions,
+  creates timestamped backups, restricts credentials to the current user and
+  SYSTEM, and never prints the secret. Uninstall removes only the owned
+  extension/registration.
+- `scripts/verify-package.mjs` packs a real tarball, checks the file list and
+  placeholder secret, installs it into an isolated prefix, and provisions a
+  bridge against a fake Spicetify config in a temporary APPDATA. It does not
+  touch the developer's Spotify, Spicetify, or OpenCode configuration.
+- Update policy pins the plugin version (exact npm spec) so OpenCode's
+  automatic package refresh cannot silently leave an incompatible bridge.
+  Updates never downgrade and never replace a local development registration
+  without an explicit setup choice.
+- The release workflow is manual-only, disabled unless
+  `NPM_PUBLISH_ENABLED=true`, uses SHA-pinned actions, read-only top-level
+  permissions, `id-token: write` only in the publish job, and publishes the
+  exact verified tarball. First publication must be manual because OIDC trusted
+  publishing requires an existing package. Provenance is omitted while the
+  repository is private.
+- Dependencies: no new runtime dependencies were added for the installer.
+  The 26 moderate advisories remain in transitive glob/minimatch/OpenCode
+  chains; CI reports them and fails on high/critical only. No forced audit fix
+  was applied.
+
+## Legacy V0.4 audit findings
 
 Preserved from V0.3: IPv4-loopback binding, secure random challenges, HMAC-SHA256,
 role-separated proofs, timing-safe verification, pre-auth gating, authentication

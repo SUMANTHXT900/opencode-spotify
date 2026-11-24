@@ -59,7 +59,42 @@ authenticated loopback WebSocket → maintained Spicetify JS → Spotify Desktop
   Origin is pinned only after successful cryptographic authentication.
   Read [PROTOCOL.md](PROTOCOL.md) for trust boundaries and handshake details.
 
-## UI
+## Distribution (V0.6.0)
+
+- `plugin/src/cli/` is a plain-TypeScript installer compiled to
+  `plugin/dist/cli/` (`npm run build:cli`) because Node refuses to type-strip
+  files installed under `node_modules`. `bin/opencode-spotify.js` loads the
+  compiled entry; `package.json` ships `src` (OpenCode server/TUI/RPC),
+  `spicetify/`, `scripts/install-extension.ps1`, `bin/`, `dist/`, and
+  `compat.json`.
+- Global registration uses the native
+  `opencode plugin add opencode-spotify@<exact-version>` command. One entry
+  loads both package parts. The installer never edits project configuration and
+  never adds a duplicate TUI-only entry to `cli.json`.
+- `detect.ts` composes read-only inspectors for OpenCode, Spotify, Spicetify,
+  bridge files/credentials and the loopback port. Missing executables are
+  probed beyond PATH (LOCALAPPDATA, `spicetify -c`, Appx query).
+- `plan.ts` presents every mutation, requires confirmation or `--yes`, and
+  never mutates on `--dry-run`. `applyPlanIfRequested` keeps `spicetify apply`
+  behind a separate consent, even when `--yes` approved the bridge files.
+- Setup provides first-time and maintenance modes, including automatic
+  Spicetify installation via winget (or the official script with explicit
+  approval and a displayed SHA-256) and a manual path with rechecks. Updates
+  pin the plugin version, never downgrade, and synchronize the owned bridge.
+  Uninstall removes only the global registration and owned bridge; credentials
+  require a separate confirmation.
+- The bridge installer remains the single implementation. Its provisioning
+  helper is compiled to `dist/scripts/provision.js`; the PowerShell script
+  prefers that file and falls back to the TypeScript source only in a checkout.
+- `scripts/verify-package.mjs` builds both compiled outputs, packs, audits the
+  file list, installs the tarball into an isolated prefix, exercises the
+  installed CLI, and provisions a bridge against a fake Spicetify config in a
+  temporary APPDATA. It never touches the developer's Spotify or OpenCode.
+- The release workflow is manual-only and disabled unless the repository
+  variable `NPM_PUBLISH_ENABLED` is set. The first registry publication must be
+  manual because npm trusted publishing requires an existing package. See
+  [DISTRIBUTION.md](DISTRIBUTION.md).
+
 
 - `MiniPlayer.tsx` claims the pinned `sidebar.footer` slot and renders the
   required order: connection header, Music/Lyrics/More navigation, framed

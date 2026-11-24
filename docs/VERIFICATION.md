@@ -1,5 +1,38 @@
 # OpenCode Spotify verification
 
+## V0.6.0 distribution verification
+
+Branch `feat/v0.6.0-distribution`, uncommitted. Player behavior is unchanged
+from V0.5.7; the new work is installer/distribution only.
+
+| Command from `plugin/` | Result |
+|---|---|
+| `npm run typecheck` | Passed |
+| `npm test` | 161 passed, 0 failed, 0 skipped |
+| `npm run test:render` | Passed |
+| `npm run test:vt` | Passed |
+| `npm run test:artwork` | Passed |
+| `node --check spicetify/opencode-spotify-bridge.js` | Passed |
+| `npm run build:cli` | Passed (compiled CLI and provisioner) |
+| `npm run verify:package` | Passed: pack list, metadata, placeholder secret, isolated install, installed `--version`/`--help`, and packed bridge provisioning against a fake Spicetify config in a temporary APPDATA |
+| `npm audit --audit-level=high` | Exit 0; 26 moderate findings remain, no high/critical. CI reports them and fails on high/critical. |
+| `actionlint` | Passed for `ci.yml` and the manual `release.yml` |
+
+V0.6.0 tests cover CLI parsing, semantic versions, registry/offline failures,
+global registration/de-registration argv, local-development conflicts, Windows
+detection fixtures (including Spicetify outside PATH, Store Spotify, duplicate
+extension keys), first-time setup/cancellation, missing prerequisites,
+maintenance mode, plugin-only and combined updates, downgrade refusal,
+repair, uninstall scope, credential separation, dry-run purity, and packed
+package assembly. No test installs Spicetify, applies Spicetify, modifies the
+developer's Spotify/OpenCode configuration, or publishes to npm.
+
+The packed-package verifier is the strongest packaging evidence: it installs
+the real tarball into an isolated prefix and exercises the compiled CLI and
+compiled bridge provisioner. It does not prove physical npm-registry install,
+PATH changes after a real Spicetify install, Windows reboot persistence, real
+Spotify playback, or terminal font behavior.
+
 ## V0.5.7 rendering and focus investigation
 
 - V0.5.6 addressed overflow but not stale cells inside the sidebar. In a

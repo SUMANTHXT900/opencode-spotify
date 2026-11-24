@@ -1,4 +1,4 @@
-# V0.5.7 compatibility and feature matrix
+# V0.6.0 compatibility and feature matrix
 
 Baseline: OpenCode 2.3.0 SDK types inspected; Spicetify CLI 2.46.7 detected.
 Available commands depend on the installed Spotify client. See the

@@ -1,0 +1,267 @@
+# Release to npm — MANUAL ONLY, currently INACTIVE.
+#
+# This workflow does nothing on push or pull_request. It runs only via an
+# explicit `workflow_dispatch` by a maintainer, the `publish` job additionally
+# requires the `npm-release` GitHub environment (required reviewers + branch
+# rules recommended) to exist and approve the run, AND the repository Actions
+# variable `NPM_PUBLISH_ENABLED` must be exactly `true` (Settings -> Variables
+# -> Actions -> New repository variable). The variable is unset by default, so
+# the publish job is skipped until the developer deliberately enables it: this
+# is the kill switch that makes the workflow genuinely inactive.
+#
+# Activation prerequisites (all still pending — see docs/DISTRIBUTION.md):
+#   1. The npm package `opencode-spotify` must exist and list this repository
+#      as a trusted publisher (npm Package Settings -> Trusted Publisher), so
+#      OIDC trusted publishing works. No NPM_TOKEN is used anywhere here.
+#   2. A GitHub environment named `npm-release` must be configured with
+#      required reviewers (and ideally a branch restriction to `main`).
+#   3. Set the repository variable `NPM_PUBLISH_ENABLED` to `true`.
+#   4. First publish must be manual (OIDC cannot create the package). Publish a
+#      prerelease such as 0.6.0-beta.1 under `beta`; npm also points `latest`
+#      at the first published version. Never publish stable `latest` before
+#      physical QA; `latest` additionally requires qa_passed=true here.
+#
+# Artifact integrity: the build job writes a SHA-256 digest file next to the
+# tarball and uploads both; the publish job re-verifies the digest before
+# publishing, so exactly the tarball CI verified is what ships.
+#
+# Private-repository caveat: this repository is currently private. npm does
+# not support provenance attestations from a private repository, so the
+# publish step omits --provenance while private. Trusted publishing still
+# works after the package exists. Do not make the repository public without
+# separate approval.
+#
+# Every third-party action below is pinned to a full commit SHA (comment shows
+# the version tag it corresponds to). The only global install is a pinned
+# npm upgrade inside the publish job, and only when the runner's npm is older
+# than 11.5.1 (the minimum for OIDC trusted publishing). No step touches
+# Spotify/Spicetify or writes any OpenCode configuration.
+
+name: Release to npm (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact package version to release (e.g. 0.6.0, no leading v)"
+        required: true
+      dist_tag:
+        description: "npm dist-tag"
+        required: true
+        default: "beta"
+        type: choice
+        options:
+          - beta
+          - latest
+      confirm:
+        description: "Type PUBLISH to confirm an irreversible npm publish"
+        required: true
+      qa_passed:
+        description: "Physical QA gates passed (required for the latest dist-tag)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require explicit PUBLISH confirmation
+        shell: bash
+        run: |
+          if [ "${{ inputs.confirm }}" != "PUBLISH" ]; then
+            echo "::error::Refusing to publish: 'confirm' must be exactly PUBLISH."
+            exit 1
+          fi
+
+      - name: Validate version, dist-tag, and branch
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version '$VERSION' is not semver (leading v is not allowed)."
+            exit 1
+          fi
+          if [ "${{ inputs.dist_tag }}" != "beta" ] && [ "${{ inputs.dist_tag }}" != "latest" ]; then
+            echo "::error::dist-tag must be beta or latest."
+            exit 1
+          fi
+          if [ "${{ inputs.dist_tag }}" = "latest" ] && [ "${{ inputs.qa_passed }}" != "true" ]; then
+            echo "::error::dist-tag 'latest' requires qa_passed=true (physical QA gates in docs/DISTRIBUTION.md). Use 'beta' first."
+            exit 1
+          fi
+          if [ "${{ inputs.dist_tag }}" = "beta" ] && [[ "$VERSION" != *-* ]]; then
+            echo "::error::The beta tag requires a prerelease version such as 0.6.0-beta.1. A first publish of a stable version also sets latest, which must wait for physical QA."
+            exit 1
+          fi
+          if [ "${{ inputs.dist_tag }}" = "latest" ] && [[ "$VERSION" == *-* ]]; then
+            echo "::error::The latest tag requires a stable version without a prerelease suffix."
+            exit 1
+          fi
+          PKG_VERSION="$(node -p "require('./plugin/package.json').version")"
+          if [ "$PKG_VERSION" != "$VERSION" ]; then
+            echo "::error::Input version '$VERSION' does not match plugin/package.json version '$PKG_VERSION'."
+            exit 1
+          fi
+          REF="${{ github.ref_name }}"
+          if [ "$REF" != "main" ] && [[ "$REF" != release/* ]]; then
+            echo "::error::Releases must run from 'main' or a 'release/*' branch (running from '$REF')."
+            exit 1
+          fi
+          echo "Release inputs valid: opencode-spotify@$VERSION tag=${{ inputs.dist_tag }} ref=$REF"
+
+  build:
+    name: Build, test, and pack on Windows
+    needs: validate
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: plugin
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.12.0'
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.3.14'
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run the full test suite
+        run: npm test
+
+      - name: Build the compiled CLI
+        run: npm run build:cli
+
+      - name: Verify packed package
+        run: node scripts/verify-package.mjs
+
+      - name: Create the exact release tarball
+        run: npm pack --ignore-scripts
+
+      - name: Record tarball digest
+        run: |
+          $tgz = "opencode-spotify-${{ inputs.version }}.tgz"
+          $hash = (Get-FileHash $tgz -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $tgz" | Out-File -FilePath "$tgz.sha256" -Encoding ascii -NoNewline
+          Get-Content "$tgz.sha256"
+
+      - name: Upload release tarball and digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-spotify-${{ inputs.version }}
+          path: |
+            plugin/opencode-spotify-${{ inputs.version }}.tgz
+            plugin/opencode-spotify-${{ inputs.version }}.tgz.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish exact tarball to npm (OIDC)
+    needs: build
+    # Kill switch: unset/anything-but-true skips this job. Set the repository
+    # Actions variable NPM_PUBLISH_ENABLED to exactly `true` to enable.
+    if: vars.NPM_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.12.0'
+
+      - name: Ensure npm supports OIDC trusted publishing
+        shell: bash
+        # Node 24.12.0 ships npm 11.6.2 (observed), which already qualifies;
+        # this step is a guard for runner image drift, not the common path.
+        run: |
+          CURRENT="$(npm --version)"
+          echo "Runner npm version: $CURRENT (need >= 11.5.1)"
+          if node -e "const [maj, min, pat] = '$CURRENT'.split('.').map(Number); process.exit(maj > 11 || (maj === 11 && (min > 5 || (min === 5 && pat >= 1))) ? 0 : 1)"; then
+            echo "Runner npm qualifies; no upgrade needed."
+          else
+            echo "Upgrading to pinned npm@11.6.2 for OIDC support."
+            npm install -g "npm@11.6.2"
+            npm --version
+          fi
+
+      - name: Download release tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: opencode-spotify-${{ inputs.version }}
+          path: dist
+
+      - name: Verify tarball digest
+        shell: bash
+        working-directory: dist
+        run: sha256sum -c "opencode-spotify-${{ inputs.version }}.tgz.sha256"
+
+      - name: Require an existing npm package (OIDC cannot bootstrap)
+        shell: bash
+        run: |
+          if ! npm view opencode-spotify name >/dev/null 2>&1; then
+            echo "::error::The npm package opencode-spotify does not exist. The first publish must be performed manually with npm login + 2FA; OIDC trusted publishing can only be configured after the package exists."
+            exit 1
+          fi
+
+      - name: Guard against duplicate version
+        shell: bash
+        run: |
+          set +e
+          OUTPUT="$(npm view "opencode-spotify@${{ inputs.version }}" version 2>&1)"
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ]; then
+            echo "::error::opencode-spotify@${{ inputs.version }} is already published. Bump the version first."
+            exit 1
+          fi
+          if echo "$OUTPUT" | grep -q "E404\|404 Not Found"; then
+            echo "Version opencode-spotify@${{ inputs.version }} is not on the registry; safe to publish."
+          else
+            echo "::error::Could not prove the version is unpublished (registry/auth failure): $OUTPUT"
+            exit 1
+          fi
+
+      - name: Publish the exact verified tarball
+        shell: bash
+        working-directory: dist
+        # OIDC trusted publishing: no NPM_TOKEN. Requires npm >= 11.5.1
+        # (provided by setup-node's bundled npm) and a trusted publisher
+        # configured on the npm package. npm authenticates via the
+        # id-token permission granted to this job only. Provenance is omitted
+        # while the GitHub repository is private (npm does not support it).
+        run: npm publish "./opencode-spotify-${{ inputs.version }}.tgz" --tag "${{ inputs.dist_tag }}" --access public
