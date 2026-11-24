@@ -55,10 +55,12 @@ export function reconciledPosition(previous: number, retainedLyricsUri: string |
 }
 
 // `receivedAt` and `now` are monotonic timestamps in the receiving TUI process.
-// Never extrapolate more than ten seconds beyond the last authoritative sample.
+// Unknown duration (<= 0) never clamps: a missing duration must not pin progress
+// at zero or stop the tick. Callers bound staleness separately.
 export function positionAt(playback: PlaybackState, receivedAt: number, now: number): number {
-  const elapsed = playback.isPlaying ? Math.max(0, Math.min(10_000, now - receivedAt)) : 0
-  return Math.min(playback.durationMs, Math.max(0, playback.positionMs + elapsed))
+  const elapsed = playback.isPlaying ? Math.max(0, now - receivedAt) : 0
+  const position = Math.max(0, playback.positionMs + elapsed)
+  return playback.durationMs > 0 ? Math.min(playback.durationMs, position) : position
 }
 
 export function formatTime(ms: number): string {

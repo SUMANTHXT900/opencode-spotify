@@ -12,10 +12,10 @@ test("slider maps measured cells and clamps outside releases", () => {
   assert.equal(clampSlider(10, 0), 0)
 })
 
-test("slider thumb and flow preserve width and stop when omitted", () => {
+test("slider thumb and width preserve static track", () => {
   assert.equal(sliderText(50, 100, 5, false), "━━•──")
   assert.equal(sliderText(50, 100, 5, true), "━━●──")
-  assert.equal(sliderText(50, 100, 5, false, 500), "━╸•──")
   assert.equal(sliderText(100, 100, 5, false), "━━━━•")
   assert.equal(sliderText(1, 0, 0, false), "")
+  assert.ok(!sliderText(50, 100, 9, true).includes("╸"), "no decorative flow glyph")
 })

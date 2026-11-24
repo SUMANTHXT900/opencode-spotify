@@ -82,9 +82,31 @@ export class StableLyricsSelection {
   private uri: string | null = null
   choose(uri: string | null, candidates: Lyrics[], settings: LyricsSettings, explicit = false) {
     if (uri !== this.uri) { this.uri = uri; this.current = null }
-    if (explicit || !this.current) this.current = selectLyrics(candidates.filter((c) => c.uri === uri), settings)
+    const live = candidates.filter((c) => c.uri === uri)
+    // Sticky while the selected document is still offered (same id+URI and
+    // selectable); withdrawn documents fall through to a fresh ranking so
+    // the view follows source replacement instead of showing stale lyrics.
+    const current = this.current
+    if (!explicit && current?.id && live.some((c) => c.id === current.id && c.status === "ready")) return current
+    this.current = selectLyrics(live, settings)
     return this.current
   }
+}
+
+// The existing source RPC uses `unavailable` for both unresolved and absent
+// sources. Share the diagnostics with the producer until that contract changes.
+export const sourceWaiting = {
+  spotify: "Waiting for Spotify lyrics",
+  lrclib: "Waiting for Spotify track/lyrics resolution",
+} as const
+
+export function isSourceWaiting(entry: { state: string; detail: string }) {
+  return entry.state === "unavailable" && (entry.detail === sourceWaiting.spotify || entry.detail === sourceWaiting.lrclib)
+}
+
+export function isAuthoritativeEmpty(resolution: { candidates: unknown[]; availability: { state: string; detail: string }[] }): boolean {
+  return resolution.candidates.length === 0 && resolution.availability.length > 0 &&
+    resolution.availability.every((entry) => (entry.state === "unavailable" || entry.state === "disabled") && !isSourceWaiting(entry))
 }
 export function parseLrc(value: string, uri: string): Lyrics | null {
   if (value.length > 262144) return null

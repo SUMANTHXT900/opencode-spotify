@@ -3,7 +3,7 @@ import { deflateSync } from "node:zlib"
 import { testRender } from "@opentui/solid"
 import { useRenderer } from "@opentui/solid"
 import { ArtworkView } from "../src/components/ArtworkView"
-import { ArtworkService, artworkUrl, decodeArtwork, type Artwork } from "../src/services/artwork"
+import { ArtworkService, artworkUrl, decodeArtwork, fitArtworkCells, type Artwork } from "../src/services/artwork"
 
 function crc32(bytes: Uint8Array) {
   let crc = 0xffffffff
@@ -35,6 +35,16 @@ assert.throws(() => decodeArtwork(png(2049, 1)))
 const decoded = decodeArtwork(bytes)
 assert.equal(decoded.width, 4); assert.equal(decoded.height, 4)
 assert.ok(decoded.accent[0] > 200 && decoded.accent[1] < 60)
+// Artwork keeps a 512 px ceiling for crisp high-DPI covers, and a small source
+// is never enlarged by the cell layout.
+const large = decodeArtwork(png(640, 640))
+assert.equal(large.width, 512)
+assert.equal(large.height, 512)
+const medium = decodeArtwork(png(300, 300))
+assert.equal(medium.width, 300)
+assert.deepEqual(fitArtworkCells(300, 300, 18, 9, 10, 20), { width: 18, height: 9 })
+assert.deepEqual(fitArtworkCells(160, 160, 18, 9, 10, 20), { width: 16, height: 8 })
+assert.deepEqual(fitArtworkCells(600, 600, 18, 9, 10, 20), { width: 18, height: 9 })
 let calls = 0
 const fetcher: typeof fetch = async (_input, init) => {
   calls++; assert.equal(init?.redirect, "error"); assert.equal(init?.credentials, "omit")

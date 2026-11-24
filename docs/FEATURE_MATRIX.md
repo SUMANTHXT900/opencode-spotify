@@ -1,4 +1,4 @@
-# V0.5 compatibility and feature matrix
+# V0.5.7 compatibility and feature matrix
 
 Baseline: OpenCode 2.3.0 SDK types inspected; Spicetify CLI 2.46.7 detected.
 Available commands depend on the installed Spotify client. See the
@@ -12,7 +12,7 @@ Available commands depend on the installed Spotify client. See the
 | seeking | absent | `Platform.PlayerAPI.seekTo(ms)` | disabled if unavailable; no ambiguous fractional seek |
 | shuffle / repeat | absent | Player getters/setters; repeat 0/1/2 | disabled individually; no Smart Shuffle toggle |
 | volume / mute | absent | Player getters/setters; volume 0..1 | disabled individually |
-| heart | absent in old bridge | guarded current-track `getHeart`/`setHeart`; sidebar/menu/palette wiring | selected-track/foreign-URI mutations rejected; current URI must match |
+| heart | absent in old bridge | guarded current-track `getHeart`/`setHeart`; sidebar and menu controls | selected-track/foreign-URI mutations rejected; current URI must match |
 | Spotify lyrics / `lyrics_unavailable` | Cosmos color-lyrics, track-bound lines | normalized provider/language, partial timing, bounded cache, stale suppression | line/static only in the maintained bridge; unavailable never affects playback |
 | `refresh_lyrics` | absent in V0.3 | parameterless command requests a fresh current-track payload | capability-gated; old extension falls back to RPC hydration |
 | `getLyricsSources` | absent in V0.3 | OpenCode RPC returns Spotify + optional LRCLIB candidates and availability | current-track URI rechecked before/after; bounded 8 candidates/2 providers |
@@ -28,11 +28,11 @@ Available commands depend on the installed Spotify client. See the
 | `get_library` | `Platform.LibraryAPI.getTracks` | paging | selected-track library mutations remain unavailable |
 | `search` | GraphQL `searchTracks` + original `searchDesktop` fallback | paged track results | hashes/private schemas may expire; request error |
 | `play_track`, `play_context` | `Player.playUri` | Play Now and whole-playlist context actions | exact selected-track-in-playlist context remains unavailable pending validated shape |
-| images | normalized `spotify:image` references in track metadata | bounded artwork fetch/decode service and `ArtworkView` cover renderer | accepts only fixed `i.scdn.co` image URLs; redirects refused; 2 MiB/2048 px limits; source aspect ratio; OpenTUI auto selects the usable protocol; colored blocks verified live |
-| artwork-derived wash | cover pixels | accent and 4×3 ambient-color analysis in service; native-cell album color and soft artwork wash modes | reduced-motion setting disables motion; album palette verified live; spatial wash live check pending |
-| seek and volume drag | native slider input | immediate local preview; one RPC on mouse release | no per-drag RPC stream; both sliders changed authoritative values in the live OpenCode check |
-| TUI sidebar | slot, keymap, dialog | responsive MiniPlayer with named controls, seek, like, preview and large targets | short terminals hide secondary rows rather than overflow |
-| TUI lyrics | custom dialog | wrapped row-virtualized viewer, follow/manual, settings/refresh, bounded motion | terminal font shaping not renderer-verified; long lines clipped not sliced |
+| images | normalized `spotify:image` references in track metadata | largest-candidate selection, 512 px decode ceiling, no-upscale cover renderer | accepts only fixed `i.scdn.co` image URLs; redirects refused; 2 MiB/2048 px limits; source aspect ratio; OpenTUI auto selects the usable protocol; colored blocks verified live |
+| artwork-derived wash | cover pixels | accent and 4×3 ambient-color analysis retained for diagnostics only | V0.5.3 paints no derived color or wash; true image pixels are the only color |
+| seek and volume drag | native slider input | immediate local preview; seek commits once on release; volume sends coalesced live commits and a final release commit | last-wins targets; stale poll cannot move an active drag; live OpenCode check performed |
+| TUI sidebar | `sidebar.footer` slot, keymap, dialog | pinned responsive card with four modes, named controls, compact volume and five-line lyric window | Todo expansion scrolls content without moving the player; short terminals reduce art/lyrics before controls |
+| TUI lyrics | custom dialog + pinned window | wrapped row-virtualized viewer, five-line centered window, follow/manual, settings/refresh, bounded motion | right-margin/native-clip containment; host-composition fixture asserts no editor-area leakage; font shaping still terminal-dependent |
 | Lyrics Settings | native dialogs | provider/script/priority/display/motion/background/accent/LRCLIB/overrides | invalid settings rejected; lrc.red disabled with reason |
 
 Sources: official [Player](https://spicetify.app/docs/development/api-wrapper/methods/player),

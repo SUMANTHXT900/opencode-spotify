@@ -5,10 +5,11 @@ export function sliderValueAt(x: number, left: number, width: number, max: numbe
   if (!Number.isFinite(x) || !Number.isFinite(left) || !Number.isFinite(width) || width <= 1) return 0
   return clampSlider((x - left) / (width - 1) * max, max)
 }
-export function sliderText(value: number, max: number, width: number, emphasis: boolean, flowPosition?: number) {
+// Plain static track: filled portion, thumb, unfilled portion. Progress advances
+// because the value advances on real time; there is no decorative animation.
+export function sliderText(value: number, max: number, width: number, emphasis: boolean) {
   const size = Math.max(0, Math.floor(width))
   if (!size) return ""
   const thumb = max > 0 ? Math.round(clampSlider(value, max) / max * (size - 1)) : 0
-  const flow = flowPosition === undefined || thumb < 2 ? -1 : Math.floor(flowPosition / 500) % thumb
-  return Array.from({ length: size }, (_, i) => i === thumb ? (emphasis ? "●" : "•") : i < thumb ? (i === flow ? "╸" : "━") : "─").join("")
+  return Array.from({ length: size }, (_, i) => i === thumb ? (emphasis ? "●" : "•") : i < thumb ? "━" : "─").join("")
 }

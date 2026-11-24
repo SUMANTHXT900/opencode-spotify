@@ -1,42 +1,54 @@
 import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show } from "solid-js"
 import { createTimeline, getTimelineEngine, TextAttributes, type ScrollBoxRenderable, type Timeline } from "@opentui/core"
 import type { MusicProps } from "./Music"
-import { selectLyricMoment, validatedWordOffsets, type LyricLine } from "../services/lyrics"
+import { followLineIndex, isInstrumentalText, selectLyricMoment } from "../services/lyrics"
 import { InstrumentalIndicator } from "./InstrumentalIndicator"
 import { CellText, Control, cellMeasure, terminalSize, useDimensions } from "../ui/primitives"
-import { followOffset, lyricLayout, visibleLyricRows, displayText, type VisualLyricRow } from "../ui/layout"
-import { lyricColors, mix, contrast } from "../ui/colors"
+import { cellSafety, followOffset, lyricLayout, visibleLyricRows } from "../ui/layout"
+import { lyricColors } from "../ui/colors"
 
-export function LyricsView(props: MusicProps & { settingsAction: () => void; height?: number }) {
+// V0.5 immersive lyrics: monochrome type only. The active line is bold white;
+// every other line is dim. No accent fills, karaoke word colors, warm mixes or
+// distance gradients. Art, when shown, is owned by the panel, never a tint.
+export function LyricsView(props: MusicProps & { settingsAction: () => void; height?: number; chrome?: "full" | "panel" }) {
   const { context } = props
   const dimensions = useDimensions()
   const terminal = terminalSize(context.renderer)
   const height = () => props.height ?? Math.max(1, Math.min(36, terminal().height - 8))
+  const fullChrome = () => props.chrome !== "panel"
   let scroll: ScrollBoxRenderable | undefined
   let motion: Timeline | undefined
   let disposed = false, generation = 0
   const [follow, setFollow] = createSignal(props.settings().follow)
   const [top, setTop] = createSignal(0)
   const [viewport, setViewport] = createSignal({ width: 1, height: 1 })
-  const [emphasis, setEmphasis] = createSignal(1)
-  const [toolFocus, setToolFocus] = createSignal(0)
-  const colors = createMemo(() => lyricColors(context.theme.text.base, context.theme.text.action.primary.base, props.settings().accent))
+  const colors = createMemo(() => lyricColors(context.theme.text.base))
+  const text = () => context.theme.text.base
+  const muted = () => context.theme.text.muted
   const moment = createMemo(() => selectLyricMoment(props.lyrics(), props.position(), !!props.state().track, props.lyrics().status === "unavailable" ? props.sources()?.availability.find((source) => source.state === "error")?.detail : undefined))
   const active = createMemo(() => { const value = moment(); return value.kind === "ready-line" ? value.lineIndex : -1 })
-  const width = () => Math.max(1, viewport().width - 3)
-  const blocks = createMemo(() => lyricLayout(props.lyrics().lines, width(), cellMeasure(context.renderer)))
+  const target = createMemo(() => followLineIndex(props.lyrics(), props.position(), !!props.state().track))
+  const instrumental = () => moment().kind === "instrumental" && follow() && props.settings().instrumental
+  // The two-cell active marker is dropped on very narrow viewports so the
+  // prefix can never make a row wider than its clipped container.
+  const gutter = () => viewport().width >= 6 ? 2 : 0
+  const width = () => Math.max(1, viewport().width - 1 - gutter())
+  const blocks = createMemo(() => lyricLayout(props.lyrics().lines.map((line) =>
+    isInstrumentalText(line.text) ? { ...line, text: "" } : line), width(), cellMeasure(context.renderer), 1, cellSafety))
   const total = () => { const last = blocks().at(-1); return last ? last.top + last.height : 0 }
   const visible = createMemo(() => visibleLyricRows(blocks(), top(), viewport().height))
   const stop = () => {
     generation++
-    if (motion) { motion.pause(); getTimelineEngine(context.renderer).unregister(motion); motion = undefined }
-    setEmphasis(1)
+    if (motion) {
+      motion.pause()
+      if (!context.renderer.isDestroyed) getTimelineEngine(context.renderer).unregister(motion)
+      motion = undefined
+    }
   }
   const manual = () => { stop(); setFollow(false) }
-  const move = (rows: number) => { manual(); scroll?.scrollBy(rows) }
   const resume = () => {
     stop(); setFollow(true)
-    scroll?.scrollTo(followOffset(blocks()[active()], viewport().height, total()))
+    scroll?.scrollTo(followOffset(blocks()[target()], viewport().height, total()))
   }
   const sync = () => {
     if (!scroll || disposed) return
@@ -64,117 +76,77 @@ export function LyricsView(props: MusicProps & { settingsAction: () => void; hei
   createEffect(on(() => props.settings().follow, (value) => { stop(); setFollow(value) }))
   createEffect(on(() => props.lyrics().uri, () => { stop(); setFollow(props.settings().follow); scroll?.scrollTo(0) }))
   createEffect(() => {
-    const index = active(), layout = blocks(), box = viewport(), following = follow(), reduce = props.settings().reducedMotion
+    const index = target(), layout = blocks(), box = viewport(), following = follow(), reduce = props.settings().reducedMotion
     if (!following || !scroll || index < 0) return
     stop()
     const ticket = generation
-    const target = followOffset(layout[index], box.height, total())
+    const destination = followOffset(layout[index], box.height, total())
     scroll.afterLayout(() => {
       if (disposed || ticket !== generation || !follow() || !scroll) return
       const current = scroll.scrollTop
-      if (reduce || Math.abs(target - current) > box.height || current === target) {
-        scroll.scrollTo(target); sync(); return
+      if (reduce || Math.abs(destination - current) > box.height || current === destination) {
+        scroll.scrollTo(destination); sync(); return
       }
-      const value = { row: current, strength: 0 }
+      const value = { row: current }
       motion = createTimeline({ duration: 180, frameRate: 20, autoplay: false }, context.renderer)
-      motion.add(value, { row: target, strength: 1, duration: 180, ease: "outQuad", onUpdate: () => {
+      motion.add(value, { row: destination, duration: 180, ease: "outQuad", onUpdate: () => {
         if (!scroll || disposed || ticket !== generation) return
-        scroll.scrollTo(Math.round(value.row)); setTop(Math.floor(scroll.scrollTop)); setEmphasis(value.strength)
-      }, onComplete: () => { if (motion) { getTimelineEngine(context.renderer).unregister(motion); motion = undefined }; setEmphasis(1) } })
+        scroll.scrollTo(Math.round(value.row)); setTop(Math.floor(scroll.scrollTop))
+      }, onComplete: () => { if (motion) { getTimelineEngine(context.renderer).unregister(motion); motion = undefined } } })
       motion.play()
     })
   })
-  context.keymap.layer(() => ({ commands: [
-    { bind: "up", run: () => move(-1) }, { bind: "down", run: () => move(1) },
-    { bind: "pageup", run: () => move(-viewport().height) }, { bind: "pagedown", run: () => move(viewport().height) },
-    { bind: "home", run: () => { manual(); scroll?.scrollTo(0) } },
-    { bind: "end", run: () => { manual(); scroll?.scrollTo(Infinity) } },
-    { bind: "f", run: resume }, { bind: "s", run: props.settingsAction },
-    { bind: "r", run: () => { void props.refreshLyrics() } },
-    { bind: "tab", enabled: () => height() >= 5, run: () => setToolFocus((value) => 1 - value) },
-    { bind: "shift+tab", enabled: () => height() >= 5, run: () => setToolFocus((value) => 1 - value) },
-    { bind: "return", enabled: () => height() >= 5, run: () => { if (toolFocus() === 0) resume(); else props.settingsAction() } },
-  ] }))
-  // Keep the whole active line slightly warm while reserving the full accent
-  // for the currently sung word. Without this split, genuine word timings would
-  // paint the same colour as the line and karaoke emphasis would be invisible.
-  const activeColor = () => {
-    const color = mix(colors().text, colors().active, (props.settings().strongEmphasis ? 0.35 : 0.12) * emphasis())
-    return contrast(color, colors().background) >= 4.5 ? color : colors().text
-  }
-  const fragments = (row: VisualLyricRow, line: LyricLine) => {
-    const words = validatedWordOffsets(line)
-    if (!words) return null
-    const raw = displayText(line.text)
-    if (raw !== line.text) return null
-    const boundaries = new Set(Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(raw), (part) => part.index))
-    boundaries.add(raw.length)
-    let at = 0
-    for (let i = 0; i <= row.row; i++) {
-      at = raw.indexOf(blocks()[row.index]!.rows[i]!, at)
-      if (at < 0) return null
-      if (i !== row.row) at += blocks()[row.index]!.rows[i]!.length
-    }
-    let valid = true
-    let cursor = at
-    const parts = words.flatMap((word) => {
-      const a = Math.max(at, word.startOffset), b = Math.min(at + row.text.length, word.endOffset)
-      // Boundaries originate in provider words and grapheme-safe wrapped rows.
-      if (a < b && (!boundaries.has(a) || !boundaries.has(b))) valid = false
-      if (a >= b) return []
-      const gap = cursor < a ? [{ text: raw.substring(cursor, a), startMs: -1, endMs: -1 }] : []
-      cursor = b
-      return [...gap, { text: raw.substring(a, b), startMs: word.startMs, endMs: word.endMs }]
-    })
-    if (cursor < at + row.text.length) parts.push({ text: raw.substring(cursor, at + row.text.length), startMs: -1, endMs: -1 })
-    return valid && parts.length ? parts : null
-  }
+  // Pointer-only: follow/settings via buttons, scroll via wheel/drag.
+  // No custom key interception; host owns dialog/panel/modal focus.
   return <box id="spotify-lyrics-view" ref={dimensions.ref} onSizeChange={() => { dimensions.sync(); scroll?.afterLayout(sync) }}
     width="100%" minWidth={0} height={height()} maxHeight={height()} flexDirection="column" paddingX={1} overflow="hidden"
     backgroundColor={props.settings().background ? colors().background : undefined}>
-    <Show when={height() >= 4}>
-      <CellText renderer={context.renderer} width={Math.max(1, dimensions.width() - 2)} text={props.state().track?.title || "Lyrics"}
-        fg={colors().text} bold truncate />
+    <Show when={fullChrome() && height() >= 4}>
+      {(() => { const title = props.state().track?.title || "Lyrics"; return <CellText id="spotify-lyrics-title"
+        renderer={context.renderer} width={Math.max(1, dimensions.width() - 2)} text={title}
+        fg={text()} bold truncate reserve={cellSafety(title)} /> })()}
     </Show>
-    <Show when={height() >= 8}>
-      <CellText renderer={context.renderer} width={Math.max(1, dimensions.width() - 2)}
-        text={`${props.lyrics().attribution || "Spotify"} · ${props.lyrics().format || "unavailable"} · ${props.lyrics().script || "unknown"}${props.lyrics().language ? ` (${props.lyrics().language})` : ""}`}
-        fg={colors().muted} truncate />
+    <Show when={fullChrome() && height() >= 8}>
+      {(() => { const meta = `${props.lyrics().attribution || "Spotify"} · ${props.lyrics().format || "unavailable"} · ${props.lyrics().script || "unknown"}${props.lyrics().language ? ` (${props.lyrics().language})` : ""}`
+        return <CellText id="spotify-lyrics-meta" renderer={context.renderer} width={Math.max(1, dimensions.width() - 2)}
+          text={meta} fg={muted()} truncate reserve={cellSafety(meta)} /> })()}
     </Show>
     <Show when={height() >= 5}>
       <box height={1} flexShrink={0} flexDirection="row" minWidth={0} overflow="hidden">
         <Control action={{ id: "lyrics-follow", label: follow() ? "Following" : "Resume follow", run: resume }}
-          renderer={context.renderer} foreground={colors().text} muted={colors().muted} accent={colors().active} focused={toolFocus() === 0} focus={() => setToolFocus(0)} />
+          renderer={context.renderer} foreground={text()} muted={muted()} accent={text()} />
         <Control action={{ id: "lyrics-settings", label: "Settings", run: props.settingsAction }}
-          renderer={context.renderer} foreground={colors().text} muted={colors().muted} accent={colors().active} focused={toolFocus() === 1} focus={() => setToolFocus(1)} />
+          renderer={context.renderer} foreground={text()} muted={muted()} accent={text()} />
       </box>
     </Show>
     <scrollbox id="spotify-lyrics-scroll" ref={(value) => { scroll = value }} width="100%" minWidth={0} minHeight={1} flexGrow={1}
-      scrollX={false} scrollY={true} onMouseScroll={manual} onMouseDown={manual} contentOptions={{ flexDirection: "column" }}>
-      <Show when={moment().kind === "instrumental" && follow()} fallback={<Show when={props.lyrics().lines.length} fallback={
-        <CellText renderer={context.renderer} width={width()} fg={colors().muted}
-          text={props.lyrics().status === "loading" ? "Finding lyrics for this track…" : "No lyrics from the enabled sources. Press S for settings or R to refresh."} />
+      scrollX={false} scrollY={true} onMouseScroll={manual} onMouseDown={(event) => {
+        event.preventDefault()
+        try { event.stopPropagation() } catch { /* noop */ }
+        manual()
+      }} contentOptions={{ flexDirection: "column" }}>
+      <Show when={!instrumental()} fallback={
+        <InstrumentalIndicator width={Math.max(1, viewport().width - 1)} height={viewport().height} playing={props.state().connection === "connected" && props.state().playback.isPlaying === true} reducedMotion={props.settings().reducedMotion} foreground={text()} muted={muted()} />
+      }>
+      <Show when={props.lyrics().lines.length} fallback={
+        (() => { const notice = props.lyrics().status === "loading" ? "Finding lyrics for this track…" : "No lyrics from the enabled sources. Use Settings or refresh from Music."
+          return <CellText renderer={context.renderer} width={width()} fg={muted()} text={notice}
+            truncate={false} reserve={cellSafety(notice)} /> })()
       }>
         <box height={visible()[0]?.top ?? 0} flexShrink={0} />
         <Index each={visible()}>{(row) => <text id={`lyric-row-${row().top}`} width={Math.max(1, viewport().width - 1)} height={1}
-          flexShrink={0} minWidth={0} wrapMode="none" attributes={row().index === active() && props.settings().strongEmphasis ? TextAttributes.BOLD : 0}
-          fg={row().index === active() ? activeColor() : row().index < active() ? colors().muted : mix(colors().muted, colors().text, 0.3)}>
-          {row().gap ? "" : row().index === active() && row().row === 0 ? "› " : "  "}
-          <Show when={!row().gap && fragments(row(), props.lyrics().lines[row().index]!)} fallback={row().text}>
-            {(parts) => <Index each={parts()}>{(part) => <span style={{ fg: row().index === active() && props.position() >= part().startMs && props.position() < part().endMs ? colors().active : undefined }}>{part().text}</span>}</Index>}
-          </Show>
+          flexShrink={0} minWidth={0} wrapMode="none" truncate attributes={row().index === active() ? TextAttributes.BOLD : 0}
+          fg={row().index === active() ? text() : muted()}>
+          {row().gap ? "" : gutter() === 0 ? "" : row().index === active() && row().row === 0 ? "› " : "  "}{row().text}
         </text>}</Index>
         <box height={Math.max(0, total() - (visible().at(-1)?.top ?? -1) - 1)} flexShrink={0} />
-      </Show>}>
-        <Show when={props.settings().instrumental} fallback={<CellText renderer={context.renderer} width={width()} text="Music playing" fg={colors().muted} />}>
-          <InstrumentalIndicator width={Math.max(1, viewport().width - 1)} height={viewport().height} playing={props.state().connection === "connected" && props.state().playback.isPlaying === true} reducedMotion={props.settings().reducedMotion} foreground={colors().text} muted={colors().muted} />
-        </Show>
+      </Show>
       </Show>
     </scrollbox>
-    <Show when={height() >= 6}>
-      <CellText renderer={context.renderer} width={Math.max(1, dimensions.width() - 2)}
-        text={props.lyrics().selectionNote || `${follow() ? "Follow" : "Manual"} · ↑↓ scroll · F follow · S settings · R refresh · Esc close`}
-        fg={colors().muted} truncate />
+    <Show when={fullChrome() && height() >= 6}>
+      {(() => { const footer = props.lyrics().selectionNote || `${follow() ? "Follow" : "Manual"} · scroll to browse · Follow/Settings buttons`
+        return <CellText id="spotify-lyrics-footer" renderer={context.renderer} width={Math.max(1, dimensions.width() - 2)}
+          text={footer} fg={muted()} truncate reserve={cellSafety(footer)} /> })()}
     </Show>
   </box>
 }

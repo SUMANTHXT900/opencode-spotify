@@ -28,12 +28,13 @@ authenticated loopback WebSocket → maintained Spicetify JS → Spotify Desktop
 - TUI snapshots are revision-gated. RPC source subscription is renewed on
   OpenCode's `server.connected`; startup hydration retries are bounded. A single
   adaptive local timer runs only while playing (250 ms for line/static lyrics,
-  100 ms for genuine word timing), with monotonic interpolation and a ten-second
-  ceiling. There is no continuous state polling.
+  100 ms for genuine word timing), with monotonic interpolation and a bounded
+  authoritative refresh when the anchor goes stale. There is no continuous
+  state polling.
 
 ## Data and lifecycle
 
-- Extension progress events are bounded to two-second snapshots; five-second
+- Extension progress events are bounded to two-second snapshots; 2.5-second
   changed-local-state checks catch settings changed outside OpenCode while paused.
   Track changes reset lyrics/timeline. The original browsing/search normalization
   and private queue API are retained. Millisecond seek uses Platform.seekTo.
@@ -60,39 +61,76 @@ authenticated loopback WebSocket → maintained Spicetify JS → Spotify Desktop
 
 ## UI
 
-- `MiniPlayer.tsx` renders a responsive hierarchy driven by terminal height and
-  width: connection/title always when space permits, then artist, progress/seek,
-  transport, secondary playback actions, lyric preview and navigation. Controls
-  are named, focusable, mouse-operable and report disabled reasons.
+- `MiniPlayer.tsx` claims the pinned `sidebar.footer` slot and renders the
+  required order: connection header, Music/Lyrics/More navigation, framed
+  artwork, title, artist, progress, fixed-width transport, compact volume, and a
+  five-line lyric window. `ui/player-layout.ts` is a pure four-mode row planner
+  (roomy/medium/tight/very-tight) that derives its budget from the terminal and
+  hides decoration before controls; `resolvePlayerBudget` adds a two-row
+  hysteresis so boundary oscillation cannot flap modes, and the terminal height
+  settles 200 ms before the budget recomputes. `services/lyrics-window.ts`
+  centers two previous/current/two upcoming lines, skips provider marker
+  lines, wraps each semantic line to its own physical rows (`wrapLyricLines`)
+  and distributes the fixed tier budget with the focus line whole and centered
+  (`distributeLyricRows`); only an over-budget focus line falls back to a
+  bounded scroll viewport. For phases that contain shaped lyrics, the
+  preview uses a scene-owned blank underlay. Changing the underlay style
+  forces a clear through the native diff. The previous layout stays in place
+  until its lyric rectangle is cleared; a moved shaped rectangle is then
+  primed before painting. The native `frame` event sequences these paints
+  without terminal escapes or a renderer-wide invalidation. The footer claim means Todo expansion scrolls the
+  content column
+  without moving or hiding the player; exactly one footer claim exists and its
+  remover runs on teardown. Controls are named, mouse-operable and report
+  disabled reasons. The sidebar has no focus target or keymap layer. Buttons
+  and slider presses suppress renderer autofocus for the handled pointer
+  event; OpenCode retains ownership of editor, dialog and panel focus.
+- `NowPlayingPanel.tsx` claims the `session.panel` slot with a compact header,
+  centered artwork, immersive lyrics, fixed-width transport and pointer controls;
+  `Music.tsx` falls back to the large lyric dialog when no panel is available.
 - `LyricsView.tsx` is a clipped native scroll viewport of pre-wrapped physical
-  rows. Grapheme segmentation and `measureEditText(..., {widthMethod:"unicode"})`
-  keep terminal cells aligned. It follows actual wrapped-row offsets, supports
-  manual scrolling and Resume follow, suppresses stale async documents, and uses
-  at most one bounded renderer timeline. Word spans appear only for validated
-  genuine timings.
+  rows. Grapheme segmentation, virama/pulli rejoin and `cellMeasure` (the max
+  of the live renderer method, wcwidth and UTF-16 unit count) supply a width
+  bound for the measured models, not a physical terminal guarantee.
+  Shared `CellText` uses manual centering and native-width nodes for shaped
+  single rows to limit right-edge overrun. The immersive view follows actual wrapped-row offsets,
+  supports manual scrolling and Resume follow, suppresses stale async
+  documents, and uses at most one bounded renderer timeline. Lyrics are
+  monochrome; marker lines are not painted and active/follow targets derive
+  from the same `selectLyricMoment` state.
 - `Music.tsx` remains a hierarchy of SDK dialogs. Folder/page views retain stable
   URI/UID selections; newer generations invalidate pending results; search runs
   on explicit submission. Queue mutation requires a unique explicit UID.
+- The TUI batches track and lyric-state transitions and checks the request
+  generation and URI before accepting a lyric response. A manual refresh
+  cannot carry over to a later occurrence of the same URI. The chosen source
+  stays selected while its document is still offered; definitive withdrawal
+  falls back to another candidate or clears the preview. Transient provider
+  or transport errors can retain the last good document for the same track.
 - `LyricsSettings.ts` edits validated provider/script/timing/display/motion/
-  background/accent/LRCLIB preferences under persistent storage key
-  `lyrics-v0.4`; per-track overrides are bounded.
-- `layout.ts`, `primitives.tsx`, `colors.ts` and `player-actions.ts` centralize
-  grapheme-safe layout, measured text/controls, contrast-guarded colors and
-  capability-aware actions. The artwork service and `ArtworkView` resolve image
-  references only to the fixed
-  `https://i.scdn.co` image path; redirects are rejected. Responses are limited
-  to 2 MiB and 2048 px, decoded/resized in memory, and retained in a bounded
-  memory-only cache. Artwork keeps its source aspect ratio. Once attached to the
-  player, OpenTUI 0.9
-  `protocol="auto"` selects native Kitty/Sixel support when detected and falls
-  back to colored blocks; requested output dimensions constrain image sizing.
+  background/LRCLIB preferences under persistent storage key `lyrics-v0.4`;
+  legacy accent/ambience/emphasis keys validate but are not painted. Per-track
+  overrides are bounded.
+- `layout.ts`, `player-layout.ts`, `transport.ts`, `primitives.tsx`, `colors.ts`,
+  `playback-ui.ts` and `player-actions.ts` centralize grapheme-safe layout,
+  responsive row planning, fixed transport geometry, measured text/controls,
+  neutral tones, optimistic volume display and capability-aware actions.
+  The bridge chooses the largest reported image candidate; the artwork service
+  and `ArtworkView` then resolve references only to the fixed `https://i.scdn.co`
+  image path, reject redirects, limit responses to 2 MiB and 2048 px, decode to
+  at most 512 px, and retain a bounded memory-only cache. Artwork keeps its
+  source aspect ratio and is never enlarged beyond the decoded texture. Once
+  attached to the player, OpenTUI 0.9 `protocol="auto"` selects native
+  Kitty/Sixel support when detected and falls back to colored blocks.
 
-Artwork analysis supplies a color accent and 4×3 ambient sample. Color/blur-
-derived native-cell wash modes are being integrated; no private dynamic-color
-service is used. Spotify private APIs remain capability-gated and fallible;
-function existence is not a live compatibility test. Authenticated
-bridge ownership, the HMAC handshake, origin pinning, command allowlist and
-OpenCode RPC authentication remain in place. Release-only slider commits send
-one seek or volume RPC on mouse release; local previews update immediately. See
-[UI_UX_DESIGN.md](UI_UX_DESIGN.md) for the detailed interaction model and
-[FEATURE_MATRIX.md](FEATURE_MATRIX.md) for runtime candidate status.
+Artwork analysis still produces an accent and 4×3 ambient sample for diagnostics,
+but V0.5.3 does not consume artwork-derived colors or draw a wash; true image
+pixels are the only color. No private dynamic-color service is used. Spotify
+private APIs remain capability-gated and fallible; function existence is not a
+live compatibility test. Authenticated bridge ownership, the HMAC handshake,
+origin pinning, command allowlist and OpenCode RPC authentication remain in
+place. Seek previews update immediately and commit once on release; volume
+previews update immediately, sends coalesced live updates and commits the final
+value on release. See [UI_UX_DESIGN.md](UI_UX_DESIGN.md) for the detailed
+interaction model and [FEATURE_MATRIX.md](FEATURE_MATRIX.md) for runtime
+candidate status.

@@ -3,7 +3,9 @@ import { imageInfo, NativeImage } from "@opentui/core"
 const origin = "https://i.scdn.co"
 const maxBytes = 2 * 1024 * 1024
 const maxDimension = 2048
-const outputSize = 160
+// Keep enough decoded pixels for the largest sidebar/panel cover. The previous
+// 160 px cap made a 6-9 row cover visibly soft on high-DPI terminals.
+const outputSize = 512
 const ambientWidth = 4
 const ambientHeight = 3
 export type RGB = readonly [number, number, number]
@@ -13,6 +15,19 @@ export interface Artwork {
   readonly height: number
   readonly accent: RGB
   readonly ambient: readonly RGB[]
+}
+
+/** Largest cell box that does not enlarge the decoded texture. */
+export function fitArtworkCells(
+  dataWidth: number, dataHeight: number, boxWidth: number, boxHeight: number,
+  cellWidth: number, cellHeight: number,
+) {
+  const maxWidth = cellWidth > 0 ? Math.max(1, Math.floor(dataWidth / cellWidth)) : boxWidth
+  const maxHeight = cellHeight > 0 ? Math.max(1, Math.floor(dataHeight / cellHeight)) : boxHeight
+  return {
+    width: Math.max(1, Math.min(boxWidth, maxWidth)),
+    height: Math.max(1, Math.min(boxHeight, maxHeight)),
+  }
 }
 
 export function artworkUrl(reference: string): string | null {

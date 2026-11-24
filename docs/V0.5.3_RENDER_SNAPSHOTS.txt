@@ -1,0 +1,642 @@
+player / 24x26
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL        No cover        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:05   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL   Vol  ━━━━•───    50% RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and…   RRRRR
+
+player / 30x26
+LLLLL Spotify ● Connected     ⚙    RRRRR
+LLLLL      Music  Lyrics  More     RRRRR
+LLLLL ┌──────────────────────────┐ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │         No cover         │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │   పరీక్ష శీర్షిక a long synt…   │ RRRRR
+LLLLL │        పరీక్ష కళాకారుడు         │ RRRRR
+LLLLL │ 0:05   •─────────   3:20 │ RRRRR
+LLLLL │                          │ RRRRR
+LLLLL │     ◀◀   Ⅱ Pause   ▶▶    │ RRRRR
+LLLLL │   Vol  ━━━━━•────    50% │ RRRRR
+LLLLL └──────────────────────────┘ RRRRR
+LLLLL                              RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and Engli…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and Engli…   RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and Engli…   RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and Engli…   RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and Engli…   RRRRR
+
+player / 40x26
+LLLLL Spotify ● Connected               ⚙    RRRRR
+LLLLL           Music  Lyrics  More          RRRRR
+LLLLL ┌────────────────────────────────────┐ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │              No cover              │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │   పరీక్ష శీర్షిక a long synthetic title   │ RRRRR
+LLLLL │             పరీక్ష కళాకారుడు              │ RRRRR
+LLLLL │ 0:05   •───────────────────   3:20 │ RRRRR
+LLLLL │                                    │ RRRRR
+LLLLL │          ◀◀   Ⅱ Pause   ▶▶     ♡   │ RRRRR
+LLLLL │       Vol  ━━━━━━•─────    50%     │ RRRRR
+LLLLL └────────────────────────────────────┘ RRRRR
+LLLLL                                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and English synthet…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English synthet…   RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and English synthet…   RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and English synthet…   RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and English synthet…   RRRRR
+
+player / 60x26
+LLLLL Spotify ● Connected                                   ⚙    RRRRR
+LLLLL                     Music  Lyrics  More                    RRRRR
+LLLLL ┌────────────────────────────────────────────────────────┐ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                        No cover                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │             పరీక్ష శీర్షిక a long synthetic title             │ RRRRR
+LLLLL │                       పరీక్ష కళాకారుడు                        │ RRRRR
+LLLLL │ 0:05   ━•──────────────────────────────────────   3:20 │ RRRRR
+LLLLL │                                                        │ RRRRR
+LLLLL │                    ◀◀   Ⅱ Pause   ▶▶               ♡   │ RRRRR
+LLLLL │                 Vol  ━━━━━━•─────    50%               │ RRRRR
+LLLLL └────────────────────────────────────────────────────────┘ RRRRR
+LLLLL                                                            RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping    RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping    RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and English synthetic text for wrapping    RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and English synthetic text for wrapping    RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and English synthetic text for wrapping    RRRRR
+
+player / 80x26
+LLLLL Spotify ● Connected                                                       ⚙    RRRRR
+LLLLL                               Music  Lyrics  More                              RRRRR
+LLLLL ┌────────────────────────────────────────────────────────────────────────────┐ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                  No cover                                  │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                       పరీక్ష శీర్షిక a long synthetic title                       │ RRRRR
+LLLLL │                                 పరీక్ష కళాకారుడు                                  │ RRRRR
+LLLLL │ 0:05   ━•──────────────────────────────────────────────────────────   3:20 │ RRRRR
+LLLLL │                                                                            │ RRRRR
+LLLLL │                              ◀◀   Ⅱ Pause   ▶▶                         ♡   │ RRRRR
+LLLLL │                           Vol  ━━━━━━•─────    50%                         │ RRRRR
+LLLLL └────────────────────────────────────────────────────────────────────────────┘ RRRRR
+LLLLL                                                                                RRRRR
+LLLLL             పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping              RRRRR
+LLLLL             పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping              RRRRR
+LLLLL             పరీక్ష 2 తెలుగు పదాలు and English synthetic text for wrapping              RRRRR
+LLLLL             పరీక్ష 3 తెలుగు పదాలు and English synthetic text for wrapping              RRRRR
+LLLLL             పరీక్ష 4 తెలుగు పదాలు and English synthetic text for wrapping              RRRRR
+
+player / 120x26
+LLLLL Spotify ● Connected                                                                                               ⚙    RRRRR
+LLLLL                                                   Music  Lyrics  More                                                  RRRRR
+LLLLL ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                      No cover                                                      │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                           పరీక్ష శీర్షిక a long synthetic title                                           │ RRRRR
+LLLLL │                                                     పరీక్ష కళాకారుడు                                                      │ RRRRR
+LLLLL │ 0:05   ━━•─────────────────────────────────────────────────────────────────────────────────────────────────   3:20 │ RRRRR
+LLLLL │                                                                                                                    │ RRRRR
+LLLLL │                                                  ◀◀   Ⅱ Pause   ▶▶                                             ♡   │ RRRRR
+LLLLL │                                               Vol  ━━━━━━•─────    50%                                             │ RRRRR
+LLLLL └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                 పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping                                  RRRRR
+LLLLL                                 పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping                                  RRRRR
+LLLLL                                 పరీక్ష 2 తెలుగు పదాలు and English synthetic text for wrapping                                  RRRRR
+LLLLL                                 పరీక్ష 3 తెలుగు పదాలు and English synthetic text for wrapping                                  RRRRR
+LLLLL                                 పరీక్ష 4 తెలుగు పదాలు and English synthetic text for wrapping                                  RRRRR
+
+player / 24x6
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:00   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+
+player / 24x8
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:00   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and…   RRRRR
+
+player / 24x10
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:00   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and…   RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+
+player / 24x14
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL                        RRRRR
+LLLLL         No co…         RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:00   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL   Vol  ━━━━•───    50% RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and…   RRRRR
+
+player / 24x18
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL        No cover        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:00   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL   Vol  ━━━━•───    50% RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and…   RRRRR
+
+player / 24x26
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL        No cover        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:00   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL   Vol  ━━━━•───    50% RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and…   RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+
+host footer / Todo 2
+Sidebar                           EDITOR SENTINEL text that must not be overwritten                                     
+Context / MCP                     EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+LLLLL Spotify ● Connec… ⚙    RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   Music  Lyrics  More  RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL        No cover        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   மிக நீளமான தமிழ் பாடல் த…   RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL        தமிழ் கலைஞர்        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL 0:04   •───────   3:20 RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   Vol  ━━━━•───    50% RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      முந்தைய வரி ஒன்று       RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      முந்தைய வரி இரண்டு      RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   தற்போதைய வரி மிகவும் நீளமா…   RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      அடுத்த வரி ஒன்று       RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      அடுத்த வரி இரண்டு      RRRRREDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+D:\project                        EDITOR SENTINEL text that must not be overwritten                                     
+
+
+host footer / Todo 18
+Sidebar                           EDITOR SENTINEL text that must not be overwritten                                     
+Context / MCP                     EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+Todo item                         EDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+LLLLL Spotify ● Connec… ⚙    RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   Music  Lyrics  More  RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL        No cover        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   மிக நீளமான தமிழ் பாடல் த…   RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL        தமிழ் கலைஞர்        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL 0:04   •───────   3:20 RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   Vol  ━━━━•───    50% RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL                        RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      முந்தைய வரி ஒன்று       RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      முந்தைய வரி இரண்டு      RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL   தற்போதைய வரி மிகவும் நீளமா…   RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      அடுத்த வரி ஒன்று       RRRRREDITOR SENTINEL text that must not be overwritten                                     
+LLLLL      அடுத்த வரி இரண்டு      RRRRREDITOR SENTINEL text that must not be overwritten                                     
+                                  EDITOR SENTINEL text that must not be overwritten                                     
+D:\project                        EDITOR SENTINEL text that must not be overwritten                                     
+
+
+player / 24 columns
+LLLLL Spotify ● Connec… ⚙    RRRRR
+LLLLL   Music  Lyrics  More  RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL        No cover        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష శీర్షిక a long sy…   RRRRR
+LLLLL       పరీక్ష కళాకారుడు        RRRRR
+LLLLL 0:00   •───────   3:20 RRRRR
+LLLLL    ◀◀   Ⅱ Pause   ▶▶   RRRRR
+LLLLL   Vol  ━━━━•───    50% RRRRR
+LLLLL                        RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and…   RRRRR
+
+player / 30 columns
+LLLLL Spotify ● Connected     ⚙    RRRRR
+LLLLL      Music  Lyrics  More     RRRRR
+LLLLL                              RRRRR
+LLLLL                              RRRRR
+LLLLL                              RRRRR
+LLLLL           No cover           RRRRR
+LLLLL                              RRRRR
+LLLLL                              RRRRR
+LLLLL                              RRRRR
+LLLLL   పరీక్ష శీర్షిక a long syntheti…   RRRRR
+LLLLL          పరీక్ష కళాకారుడు           RRRRR
+LLLLL 0:00   •─────────────   3:20 RRRRR
+LLLLL       ◀◀   Ⅱ Pause   ▶▶  ♡   RRRRR
+LLLLL    Vol  ━━━━━━•─────    50%  RRRRR
+LLLLL                              RRRRR
+LLLLL                              RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and Engli…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and Engli…   RRRRR
+
+player / 40 columns
+LLLLL Spotify ● Connected               ⚙    RRRRR
+LLLLL           Music  Lyrics  More          RRRRR
+LLLLL                                        RRRRR
+LLLLL                                        RRRRR
+LLLLL                                        RRRRR
+LLLLL                No cover                RRRRR
+LLLLL                                        RRRRR
+LLLLL                                        RRRRR
+LLLLL                                        RRRRR
+LLLLL     పరీక్ష శీర్షిక a long synthetic title     RRRRR
+LLLLL               పరీక్ష కళాకారుడు                RRRRR
+LLLLL 0:00   •───────────────────────   3:20 RRRRR
+LLLLL            ◀◀   Ⅱ Pause   ▶▶       ♡   RRRRR
+LLLLL         Vol  ━━━━━━•─────    50%       RRRRR
+LLLLL                                        RRRRR
+LLLLL                                        RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and English synthet…   RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English synthet…   RRRRR
+
+player / 60 columns
+LLLLL Spotify ● Connected                                   ⚙    RRRRR
+LLLLL                     Music  Lyrics  More                    RRRRR
+LLLLL                                                            RRRRR
+LLLLL                                                            RRRRR
+LLLLL                                                            RRRRR
+LLLLL                          No cover                          RRRRR
+LLLLL                                                            RRRRR
+LLLLL                                                            RRRRR
+LLLLL                                                            RRRRR
+LLLLL               పరీక్ష శీర్షిక a long synthetic title               RRRRR
+LLLLL                         పరీక్ష కళాకారుడు                          RRRRR
+LLLLL 0:00   •───────────────────────────────────────────   3:20 RRRRR
+LLLLL                      ◀◀   Ⅱ Pause   ▶▶                 ♡   RRRRR
+LLLLL                   Vol  ━━━━━━•─────    50%                 RRRRR
+LLLLL                                                            RRRRR
+LLLLL                                                            RRRRR
+LLLLL   పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping    RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping    RRRRR
+
+player / 80 columns
+LLLLL Spotify ● Connected                                                       ⚙    RRRRR
+LLLLL                               Music  Lyrics  More                              RRRRR
+LLLLL                                                                                RRRRR
+LLLLL                                                                                RRRRR
+LLLLL                                                                                RRRRR
+LLLLL                                    No cover                                    RRRRR
+LLLLL                                                                                RRRRR
+LLLLL                                                                                RRRRR
+LLLLL                                                                                RRRRR
+LLLLL                         పరీక్ష శీర్షిక a long synthetic title                         RRRRR
+LLLLL                                   పరీక్ష కళాకారుడు                                    RRRRR
+LLLLL 0:00   •───────────────────────────────────────────────────────────────   3:20 RRRRR
+LLLLL                                ◀◀   Ⅱ Pause   ▶▶                           ♡   RRRRR
+LLLLL                             Vol  ━━━━━━•─────    50%                           RRRRR
+LLLLL                                                                                RRRRR
+LLLLL                                                                                RRRRR
+LLLLL             పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping              RRRRR
+LLLLL             పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping              RRRRR
+
+player / 120 columns
+LLLLL Spotify ● Connected                                                                                               ⚙    RRRRR
+LLLLL                                                   Music  Lyrics  More                                                  RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                                        No cover                                                        RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                             పరీక్ష శీర్షిక a long synthetic title                                             RRRRR
+LLLLL                                                       పరీక్ష కళాకారుడు                                                        RRRRR
+LLLLL 0:00   •───────────────────────────────────────────────────────────────────────────────────────────────────────   3:20 RRRRR
+LLLLL                                                    ◀◀   Ⅱ Pause   ▶▶                                               ♡   RRRRR
+LLLLL                                                 Vol  ━━━━━━•─────    50%                                               RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL                                 పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping                                  RRRRR
+LLLLL                                 పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping                                  RRRRR
+
+lyrics / 24 columns
+LLLLL పరీక్ష శీర్షిక a long sy…     RRRRR
+LLLLL Spotify · line · mixed RRRRR
+LLLLL ›Following  Settings   RRRRR
+LLLLL › పరీక్ష 0 తెలుగు పదాలు      ▀ RRRRR
+LLLLL   and English          RRRRR
+LLLLL   synthetic text       RRRRR
+LLLLL   for wrapping         RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు        RRRRR
+LLLLL   and English          RRRRR
+LLLLL   synthetic text       RRRRR
+LLLLL   for wrapping         RRRRR
+LLLLL                        RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు        RRRRR
+LLLLL   and English          RRRRR
+LLLLL   synthetic text       RRRRR
+LLLLL   for wrapping         RRRRR
+LLLLL Follow · ↑↓ scroll · … RRRRR
+
+lyrics / 30 columns
+LLLLL పరీక్ష శీర్షిక a long syntheti…     RRRRR
+LLLLL Spotify · line · mixed       RRRRR
+LLLLL ›Following  Settings         RRRRR
+LLLLL › పరీక్ష 0 తెలుగు పదాలు and        ▀ RRRRR
+LLLLL   English synthetic          RRRRR
+LLLLL   text for wrapping          RRRRR
+LLLLL                              RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and          RRRRR
+LLLLL   English synthetic          RRRRR
+LLLLL   text for wrapping          RRRRR
+LLLLL                              RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and          RRRRR
+LLLLL   English synthetic          RRRRR
+LLLLL   text for wrapping          RRRRR
+LLLLL                              RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and          RRRRR
+LLLLL   English synthetic          RRRRR
+LLLLL Follow · ↑↓ scroll · F foll… RRRRR
+
+lyrics / 40 columns
+LLLLL పరీక్ష శీర్షిక a long synthetic title         RRRRR
+LLLLL Spotify · line · mixed                 RRRRR
+LLLLL ›Following  Settings                   RRRRR
+LLLLL › పరీక్ష 0 తెలుగు పదాలు and English          ▀ RRRRR
+LLLLL   synthetic text for wrapping          RRRRR
+LLLLL                                        RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English            RRRRR
+LLLLL   synthetic text for wrapping          RRRRR
+LLLLL                                        RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and English            RRRRR
+LLLLL   synthetic text for wrapping          RRRRR
+LLLLL                                        RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and English            RRRRR
+LLLLL   synthetic text for wrapping          RRRRR
+LLLLL                                        RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and English            RRRRR
+LLLLL   synthetic text for wrapping          RRRRR
+LLLLL Follow · ↑↓ scroll · F follow · S set… RRRRR
+
+lyrics / 60 columns
+LLLLL పరీక్ష శీర్షిక a long synthetic title                             RRRRR
+LLLLL Spotify · line · mixed                                     RRRRR
+LLLLL ›Following  Settings                                       RRRRR
+LLLLL › పరీక్ష 0 తెలుగు పదాలు and English synthetic text for           ▀ RRRRR
+LLLLL   wrapping                                                 RRRRR
+LLLLL                                                            RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English synthetic text for             RRRRR
+LLLLL   wrapping                                                 RRRRR
+LLLLL                                                            RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and English synthetic text for             RRRRR
+LLLLL   wrapping                                                 RRRRR
+LLLLL                                                            RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and English synthetic text for             RRRRR
+LLLLL   wrapping                                                 RRRRR
+LLLLL                                                            RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and English synthetic text for             RRRRR
+LLLLL   wrapping                                                 RRRRR
+LLLLL Follow · ↑↓ scroll · F follow · S settings · R refresh · … RRRRR
+
+lyrics / 80 columns
+LLLLL పరీక్ష శీర్షిక a long synthetic title                                                 RRRRR
+LLLLL Spotify · line · mixed                                                         RRRRR
+LLLLL ›Following  Settings                                                           RRRRR
+LLLLL › పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping                      ▀ RRRRR
+LLLLL                                                                                RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping                        RRRRR
+LLLLL                                                                                RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and English synthetic text for wrapping                        RRRRR
+LLLLL                                                                                RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and English synthetic text for wrapping                        RRRRR
+LLLLL                                                                                RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and English synthetic text for wrapping                        RRRRR
+LLLLL                                                                                RRRRR
+LLLLL   పరీక్ష 5 తెలుగు పదాలు and English synthetic text for wrapping                        RRRRR
+LLLLL                                                                                RRRRR
+LLLLL   పరీక్ష 6 తెలుగు పదాలు and English synthetic text for wrapping                        RRRRR
+LLLLL                                                                                RRRRR
+LLLLL Follow · ↑↓ scroll · F follow · S settings · R refresh · Esc close             RRRRR
+
+lyrics / 120 columns
+LLLLL పరీక్ష శీర్షిక a long synthetic title                                                                                         RRRRR
+LLLLL Spotify · line · mixed                                                                                                 RRRRR
+LLLLL ›Following  Settings                                                                                                   RRRRR
+LLLLL › పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping                                                              ▀ RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL   పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping                                                                RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL   పరీక్ష 2 తెలుగు పదాలు and English synthetic text for wrapping                                                                RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL   పరీక్ష 3 తెలుగు పదాలు and English synthetic text for wrapping                                                                RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL   పరీక్ష 4 తెలుగు పదాలు and English synthetic text for wrapping                                                                RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL   పరీక్ష 5 తెలుగు పదాలు and English synthetic text for wrapping                                                                RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL   పరీక్ష 6 తెలుగు పదాలు and English synthetic text for wrapping                                                                RRRRR
+LLLLL                                                                                                                        RRRRR
+LLLLL Follow · ↑↓ scroll · F follow · S settings · R refresh · Esc close                                                     RRRRR
+
+panel / 80 columns
+ Panel title here — Panel artist                                   Full  Close            
+                                                                                          
+                                                                                          
+                                                                                          
+                                                                                          
+                                                                                          
+                                                                                          
+                                         No cover                                         
+                                                                                          
+                                                                                          
+                                                                                          
+                                                                                          
+                                                                                          
+  ›Following  Settings                                                                    
+    పరీక్ష 0 తెలుగు పదాలు and English synthetic text for wrapping                              █  
+                                                                                       ▀  
+  › పరీక్ష 1 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 2 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 3 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 4 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 5 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 6 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 7 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 8 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+    పరీక్ష 9 తెలుగు పదాలు and English synthetic text for wrapping                                 
+                                                                                          
+                                     ◀◀  ›Ⅱ Pause   ▶▶                                ♡   
+ ↑↓ scroll · F follow · S settings · R refresh · T full · Esc close                       
+
+panel / 24 columns
+ Panel ti… Full  Close    
+  ›Following  Settings    
+    పరీక్ష 0 తెలుగు పదాలు      ▀  
+    and English           
+    synthetic text        
+    for wrapping          
+                          
+  › పరీక్ష 1 తెలుగు పదాలు         
+    and English           
+    synthetic text        
+    for wrapping          
+                          
+    పరీక్ష 2 తెలుగు పదాలు         
+    and English           
+    synthetic text        
+    for wrapping          

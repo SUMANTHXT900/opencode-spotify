@@ -10,7 +10,7 @@ export async function lyricsSettingsDialog(props: MusicProps) {
   const fit = (value: string) => truncateCells(value, Math.max(1, Math.min(60, context.renderer.width - 10)), cellMeasure(context.renderer))
   const menu = (title: string, rows: { title: string; value: string; description?: string; disabled?: boolean; category?: string }[], current?: string) =>
     context.ui.dialog.select({ title: fit(title), current, options: rows.map((row) => ({ ...row, title: fit(row.title), description: row.description ? fit(row.description) : undefined })) })
-  const toggleKeys = ["preview", "follow", "reducedMotion", "background", "artwork", "progressMotion", "showVolume", "instrumental", "strongEmphasis"] as const
+  const toggleKeys = ["preview", "follow", "reducedMotion", "background", "artwork", "showVolume", "instrumental"] as const
   const toggles = (key: typeof toggleKeys[number], title: string, category: string) => ({
     title: `${title}: ${draft[key] ? "on" : "off"}`, value: key, category,
   })
@@ -18,25 +18,21 @@ export async function lyricsSettingsDialog(props: MusicProps) {
     const graphics = graphicsCapabilities(context.renderer.capabilities, !!context.renderer.resolution)
     const lyric = props.lyrics()
     const choice = await menu("Spotify Settings · changes apply on Save", [
-      toggles("progressMotion", "Progress animation", "Playback"),
       { title: `Seek increment: ${draft.seekSeconds === null ? "default" : `${draft.seekSeconds}s`}`, value: "seekSeconds", category: "Playback" },
       toggles("showVolume", "Sidebar volume", "Playback"),
       { title: `Source: ${draft.provider}`, value: "provider", category: "Lyrics" },
       { title: "This track's version…", value: "track", category: "Lyrics" },
       { title: `Script: ${draft.script}`, value: "script", category: "Lyrics" },
       { title: `Priority: ${draft.priority === "timing" ? "synchronization" : "selected script"}`, value: "priority", category: "Lyrics" },
-      toggles("preview", "Compact preview", "Lyrics"),
+      toggles("preview", "Lyric window (5/3/1 lines)", "Lyrics"),
       toggles("follow", "Follow active line", "Lyrics"),
       { title: `LRCLIB access: ${draft.lrclibEnabled ? "enabled" : "off"}`, value: "access", category: "Lyrics" },
       { title: "Refresh sources (saved settings)", value: "refresh", category: "Lyrics" },
-      toggles("artwork", "Cover artwork", "Appearance"),
+      toggles("artwork", "Cover artwork (true image pixels)", "Appearance"),
       { title: `Cover size: ${draft.artworkSize}`, value: "artworkSize", category: "Appearance" },
-      { title: `Sidebar background: ${draft.ambience}`, value: "ambience", category: "Appearance" },
       toggles("reducedMotion", "Reduced motion", "Appearance"),
-      toggles("background", "Neutral expanded lyric background", "Appearance"),
-      toggles("strongEmphasis", "Bold active lyrics", "Appearance"),
+      toggles("background", "Neutral lyric background", "Appearance"),
       toggles("instrumental", "Instrumental dots", "Appearance"),
-      { title: `Active lyric color: ${draft.accent || "theme"}`, value: "accent", category: "Appearance" },
       { title: `Spotify: ${props.state().connection}`, value: "connection", disabled: true, category: "Diagnostics" },
       { title: `Lyrics: ${lyric.provider ?? "none"} · ${lyric.format}`, value: "lyric-status", disabled: true, category: "Diagnostics" },
       { title: `Artwork renderer: ${graphics.imageProtocol}`, value: "graphics", disabled: true, category: "Diagnostics",
@@ -55,13 +51,6 @@ export async function lyricsSettingsDialog(props: MusicProps) {
       draft = { ...draft, [key]: !draft[key] }
     } else if (choice === "artworkSize") {
       draft = { ...draft, artworkSize: draft.artworkSize === "auto" ? "small" : "auto" }
-    } else if (choice === "ambience") {
-      const value = await menu("Sidebar background", [
-        { title: "Terminal theme", value: "theme" },
-        { title: "Album colors", value: "album", disabled: !graphics.trueColor, description: "Requires RGB terminal color" },
-        { title: "Soft album artwork", value: "artwork", disabled: !graphics.trueColor, description: "Low-resolution artwork colors behind the player" },
-      ], draft.ambience)
-      if (value === "theme" || value === "album" || value === "artwork") draft = { ...draft, ambience: value }
     } else if (choice === "seekSeconds") {
       const value = await context.ui.dialog.prompt({ title: "Seek step in seconds (1–120, empty = default)", placeholder: "10" })
       if (value === "") draft = { ...draft, seekSeconds: null }
@@ -112,12 +101,6 @@ export async function lyricsSettingsDialog(props: MusicProps) {
         { title: "Prefer selected script", value: "script" },
       ], draft.priority)
       if (value === "timing" || value === "script") draft = { ...draft, priority: value }
-    } else if (choice === "accent") {
-      const value = await context.ui.dialog.prompt({ title: "Lyric color: #RRGGBB (empty = theme)", placeholder: "#8fc7a0" })
-      if (value !== undefined) {
-        if (value === "" || /^#[a-f0-9]{6}$/i.test(value)) draft = { ...draft, accent: value }
-        else context.ui.toast.show({ message: "Use #RRGGBB or leave empty", variant: "error" })
-      }
     } else if (choice === "access") {
       if (draft.lrclibEnabled) draft = { ...draft, lrclibEnabled: false }
       else if (await context.ui.dialog.confirm({ title: "Enable LRCLIB?", message: "Shares the current title, artist, album and duration with lrclib.net. Lyrics stay in memory. An application URL or contact email is required." })) {

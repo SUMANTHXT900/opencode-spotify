@@ -31,8 +31,11 @@ test("progress uses a monotonic clock, stops on pause and caps drift", () => {
   const playing = { ...emptyPlayback(), positionMs: 1000, durationMs: 50000, isPlaying: true }
   assert.equal(positionAt(playing, 100, 1100), 2000)
   assert.equal(positionAt({ ...playing, isPlaying: false }, 100, 1100), 1000)
-  assert.equal(positionAt(playing, 100, 50000), 11000)
+  // No extrapolation ceiling here: duration bounds growth, and the TUI triggers
+  // a bounded authoritative refresh when the anchor itself goes stale.
+  assert.equal(positionAt(playing, 100, 50000), 50000)
   assert.equal(positionAt({ ...playing, durationMs: 1500 }, 100, 5000), 1500)
+  assert.equal(positionAt({ ...playing, durationMs: 0 }, 100, 50000), 50900)
 })
 
 test("lyric timestamps, ordering, seeks, unsynced and unavailable content", () => {

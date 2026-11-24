@@ -77,6 +77,7 @@
   let retryTimer = null;
   let currentUri = null;
   let currentRequest = 0;
+  let clearTimer = null;
   let queueListenerAttached = false;
   let queueCallback = null;
   let queueEvents = null;
@@ -506,6 +507,14 @@
       if (!Number.isFinite(ms) || ms < 0 || ms > 86400000) throw bridgeError("invalid_input", "Seek uses nonnegative milliseconds");
       if (typeof Spicetify.Platform?.PlayerAPI?.seekTo !== "function") throw bridgeError("unsupported", "Millisecond seeking unavailable");
       await Spicetify.Platform.PlayerAPI.seekTo(Math.min(ms, Spicetify.Player.getDuration()));
+      // getProgress can lag one progress tick behind the seek; re-sample briefly
+      // so the forced snapshot carries the post-seek anchor, not a stale echo.
+      for (let i = 0; i < 5; i++) {
+        let at = NaN;
+        try { at = Spicetify.Player.getProgress(); } catch { /* keep polling below */ }
+        if (!Number.isFinite(at) || Math.abs(at - ms) <= 1500) break;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
       sendPlayback(true);
       return { accepted: true };
     }
@@ -757,13 +766,22 @@
     if (!item || !item.uri) return null;
     const meta = item.metadata || {};
     const artists = normalizeArtists(item.artists);
+    // Metadata may expose a small image_url before the full item.images list.
+    // Consider every candidate so the bridge returns the largest source.
+    const images = [
+      ...(Array.isArray(item.images) ? item.images : item.images ? [item.images] : []),
+      ...(Array.isArray(item.album?.images) ? item.album.images : []),
+      ...(Array.isArray(item.albumOfTrack?.coverArt?.sources) ? item.albumOfTrack.coverArt.sources : []),
+      meta.image_url,
+      meta.image_xlarge_url,
+    ];
     return {
       type: "track",
       uri: item.uri,
       title: meta.title || "",
       artist: artists.length ? artists.map((artist) => artist.name).join(", ") : meta.artist_name || "",
       album: meta.album_title || "",
-      image: normalizeImage(meta.image_url || meta.image_xlarge_url || item.images || []),
+      image: normalizeImage(images),
     };
   }
 
@@ -824,12 +842,23 @@
     if (!authenticated) return;
     const track = getTrack();
     if (!track || !isTrackUri(track.uri)) {
-      currentUri = null;
-      ++currentRequest;
-      emit({ type: "track_cleared" });
-      sendPlayback(true);
+      // Player metadata can be transiently null mid-transition; debouncing the
+      // clear avoids wiping lyrics/progress for the same track. The pending
+      // clear is cancelled as soon as a valid track returns.
+      if (!clearTimer) clearTimer = setTimeout(() => {
+        clearTimer = null;
+        if (disposed || !authenticated) return;
+        const again = getTrack();
+        if (again && isTrackUri(again.uri)) { updateSong(false); return; }
+        currentUri = null;
+        ++currentRequest;
+        emit({ type: "track_cleared" });
+        sendPlayback(true);
+      }, 1500);
       return;
     }
+    clearTimeout(clearTimer);
+    clearTimer = null;
     if (!force && track.uri === currentUri) return;
     currentUri = track.uri;
     const requestId = ++currentRequest;
@@ -922,9 +951,12 @@
     if (!authenticated) return;
     if (!force && performance.now() - lastPlayback < 2000) return;
     lastPlayback = performance.now();
-    emit({ type: "playback", playback: playbackState() });
+    const state = playbackState();
+    lastSnapshotKey = JSON.stringify({ ...state, updatedAt: 0 });
+    emit({ type: "playback", playback: state });
   }
-  function songChanged() { updateSong(true); }
+  // Spurious same-track songchange events must not bump lyric generations.
+  function songChanged() { updateSong(false); }
   function playbackChanged() { sendPlayback(true); }
   function progressChanged() { sendPlayback(); }
   async function receiveServer(event, connection) {
@@ -976,7 +1008,7 @@
         const p = playbackState();
         const key = JSON.stringify({ ...p, updatedAt: 0 });
         if (key !== lastSnapshotKey) { lastSnapshotKey = key; sendPlayback(true); }
-      }, 5000);
+      }, 2500);
       return;
     }
     await onMessage(event);
@@ -988,6 +1020,8 @@
     clearTimeout(initTimer);
     clearTimeout(handshakeTimer);
     clearTimeout(queueUpdateTimer);
+    clearTimeout(clearTimer);
+    clearTimer = null;
     clearInterval(snapshotTimer);
     for (const timer of lyricTimers) clearTimeout(timer);
     lyricTimers.clear();

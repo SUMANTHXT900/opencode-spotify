@@ -3,8 +3,31 @@ node_modules/
 dist/
 *.tgz
 .env
+.env.*
+!.env.example
+.npmrc
+.opencode/
+opencode.json
+opencode.jsonc
+cli.json
 bridge.json
+credentials.json
+auth.json
+*.pem
+*.key
+*.pfx
+*.p12
+*.log
+coverage/
+.cache/
+*.tsbuildinfo
+*.bak
 *.spotify-backup-*
 *.backup-*
 *.tmp
-opencode.jsonc
+# An accidental PowerShell/Windows output redirection artifact.
+/plugin/NUL
+# Historical terminal captures can include live account or session content.
+/docs/V0.5.3_BEFORE_AFTER.png
+/docs/V0.5.3_LIVE_SIDEBAR.*
+/docs/V0.5.3_TODO_*.png

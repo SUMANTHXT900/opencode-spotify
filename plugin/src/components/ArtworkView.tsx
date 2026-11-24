@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, Show, type Accessor } from "solid-js"
 import { NativeImage, type ColorInput } from "@opentui/core"
-import { artworkUrl, spotifyArtwork, type Artwork } from "../services/artwork"
+import { artworkUrl, fitArtworkCells, spotifyArtwork, type Artwork } from "../services/artwork"
 import { CellText } from "../ui/primitives"
 import type { CliRenderer } from "@opentui/core"
 
@@ -32,6 +32,16 @@ export function ArtworkView(props: {
   const [image, setImage] = createSignal<NativeImage>()
   const [failed, setFailed] = createSignal(false)
   const art = createMemo(() => props.artwork.kind === "ready" ? props.artwork.data : undefined)
+  // Never ask the terminal to enlarge a decoded texture: on low-DPI/block
+  // fallbacks that is what turns a 160 px thumbnail into a blurry 300 px cover.
+  const display = createMemo(() => {
+    const data = art()
+    if (!data) return { width: props.width, height: props.height }
+    const pixels = props.renderer.resolution
+    const cellWidth = pixels && props.renderer.width > 0 ? pixels.width / props.renderer.width : 0
+    const cellHeight = pixels && props.renderer.height > 0 ? pixels.height / props.renderer.height : 0
+    return fitArtworkCells(data.width, data.height, props.width, props.height, cellWidth, cellHeight)
+  })
   createEffect(on(art, (data) => {
     setImage(undefined)
     setFailed(false)
@@ -48,9 +58,8 @@ export function ArtworkView(props: {
       <CellText renderer={props.renderer} width={props.width} text={props.artwork.kind === "loading" ? "Loading…" : "No cover"}
         fg={props.muted} center truncate />
     }>
-      <image id="spotify-cover-image" width={props.width} height={props.height} protocol="auto" fit="fit"
+      <image id="spotify-cover-image" width={display().width} height={display().height} protocol="auto" fit="fit"
         source={image()} onError={() => setFailed(true)} />
     </Show>
   </box>
 }
-

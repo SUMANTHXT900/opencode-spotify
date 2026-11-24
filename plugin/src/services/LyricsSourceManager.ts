@@ -1,5 +1,5 @@
 import { normalizeLyrics, type Lyrics } from "./lyrics.ts"
-import { parseLrc, validContact } from "./lyrics-source.ts"
+import { parseLrc, sourceWaiting, validContact } from "./lyrics-source.ts"
 import { object } from "./validation.ts"
 
 export interface LyricsTrack { uri: string; title: string; artist: string; album: string; durationMs: number }
@@ -24,14 +24,14 @@ export class LyricsSourceManager {
     const candidates = spotify.uri === track.uri && spotify.status === "ready" ? [spotify] : []
     const availability: SourceResolution["availability"] = [{
       provider: "spotify", state: candidates.length ? "ready" : "unavailable",
-      detail: candidates.length ? "Connected Spotify client" : spotify.status === "loading" ? "Waiting for Spotify lyrics" : "Spotify returned no lyrics",
+      detail: candidates.length ? "Connected Spotify client" : spotify.status === "loading" ? sourceWaiting.spotify : "Spotify returned no lyrics",
     }]
     if (!options.enabled || !validContact(options.contact)) {
       availability.push({ provider: "lrclib", state: "disabled", detail: "Opt-in and client contact required" })
       return { uri: track.uri, candidates, availability }
     }
     if (spotify.status === "loading") {
-      availability.push({ provider: "lrclib", state: "unavailable", detail: "Waiting for Spotify track/lyrics resolution" })
+      availability.push({ provider: "lrclib", state: "unavailable", detail: sourceWaiting.lrclib })
       return { uri: track.uri, candidates, availability }
     }
     const key = JSON.stringify(track)
@@ -71,7 +71,7 @@ export class LyricsSourceManager {
     try {
       const response = await this.fetcher(url, {
         redirect: "error", signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(6000)]),
-        headers: { "User-Agent": `OpenCodeSpotify/0.4.0 (${contact})`, Accept: "application/json" },
+        headers: { "User-Agent": `OpenCodeSpotify/0.5.7 (${contact})`, Accept: "application/json" },
       })
       if (response.status === 429 || response.status === 503) {
         const header = response.headers.get("Retry-After") ?? ""

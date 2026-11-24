@@ -1,6 +1,6 @@
 {
   "name": "opencode-spotify",
-  "version": "0.5.0",
+  "version": "0.5.7",
   "description": "Spotify mini-player for the OpenCode terminal UI",
   "type": "module",
   "license": "MIT",
@@ -16,7 +16,10 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/*.test.ts"
+    "test": "node --test tests/*.test.ts",
+    "test:render": "bun --preload @opentui/solid/preload tests/render-layout.tsx",
+    "test:artwork": "bun --preload @opentui/solid/preload tests/render-artwork.tsx",
+    "test:vt": "node --test tests/vt-emission.test.ts"
   },
   "dependencies": {
     "@opencode/plugin": "2.3.0",

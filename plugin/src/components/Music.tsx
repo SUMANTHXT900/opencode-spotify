@@ -22,6 +22,8 @@ export interface MusicProps {
   saveSettings: (settings: LyricsSettings) => Promise<void>
   sources: Accessor<SourceResolution | null>
   refreshLyrics: () => Promise<void>
+  /** Optimistic local seek: the TUI holds this position until the bridge acknowledges. */
+  previewSeek?: (positionMs: number) => void
 }
 
 // A hierarchy of SDK-provided dialogs, not a simulated tab UI.
@@ -60,6 +62,7 @@ export function musicActions(props: MusicProps) {
       ["Shuffle", "set_shuffle"], ["Repeat", "set_repeat"],
       ["Volume…", "set_volume"], ["Volume +5%", "set_volume"], ["Volume −5%", "set_volume"],
       ["Mute / Unmute", "set_mute"], ["Like / Unlike current track", "set_liked"],
+      ["Refresh playback", "get_playback"],
     ]
     const choice = await select(`Now Playing · ${state().track?.title || "Not connected"}`, [
       { title: state().track?.artist || "No artist", description: state().track?.album || "", value: "metadata", disabled: true },
@@ -187,9 +190,16 @@ export function musicActions(props: MusicProps) {
     if (query?.trim()) await pages("search", { query: query.trim() }, `Search: ${query}`)
   }
   function lyrics() {
-    context.ui.dialog.set({ size: "large" })
-    context.ui.dialog.show(() => <LyricsView {...props} settingsAction={() => void settings()} />)
+    // Prefer the dedicated session panel; fall back to the large dialog where
+    // the host offers no session.panel slot.
+    let opened = false
+    try { opened = context.ui.panel?.open?.("spotify", { presentation: "panel" }) === true } catch { opened = false }
+    if (!opened) {
+      context.ui.dialog.set({ size: "large" })
+      context.ui.dialog.show(() => <LyricsView {...props} settingsAction={() => void settings()} />)
+    }
   }
+  function panel() { lyrics() }
   async function settings() { await lyricsSettingsDialog(props) }
   async function guarded(action: () => Promise<unknown> | void) {
     try { await action() } catch (error) {
@@ -199,16 +209,19 @@ export function musicActions(props: MusicProps) {
   async function open() {
     const choice = await select(`Music · ${state().track?.title || "Not connected"}`, [
       { title: "Now Playing / Controls", value: "playback" },
+      { title: "Now Playing panel", value: "panel" },
       { title: "Lyrics", value: "lyrics" },
       { title: "Lyrics Settings", value: "settings" },
       { title: "Queue", value: "queue", disabled: !supported("get_queue") },
       { title: "Playlists / Folders", value: "playlists", disabled: !supported("get_playlists") },
       { title: "Liked Songs", value: "library", disabled: !supported("get_library") },
       { title: "Search", value: "search", disabled: !supported("search") },
+      { title: "Refresh state", value: "refresh" },
     ])
-    const actions: Record<string, () => Promise<unknown> | void> = { playback, lyrics, settings, queue, playlists, library: () => pages("get_library", {}, "Liked Songs"), search }
+    const actions: Record<string, () => Promise<unknown> | void> = { playback, panel, lyrics, settings, queue, playlists, library: () => pages("get_library", {}, "Liked Songs"), search,
+      refresh: () => run("get_playback") }
     if (choice && actions[choice]) await guarded(actions[choice]!)
   }
   const launch = (fn: () => Promise<unknown> | void) => { generation++; return guarded(fn) }
-  return { open: () => launch(open), playback: () => launch(playback), settings: () => launch(settings), queue: () => launch(queue), search: () => launch(search), lyrics: () => { generation++; lyrics() }, run, supported, dispose: () => { disposed = true; generation++ } }
+  return { open: () => launch(open), playback: () => launch(playback), settings: () => launch(settings), queue: () => launch(queue), search: () => launch(search), lyrics: () => { generation++; lyrics() }, panel: () => { generation++; panel() }, run, supported, dispose: () => { disposed = true; generation++ } }
 }
