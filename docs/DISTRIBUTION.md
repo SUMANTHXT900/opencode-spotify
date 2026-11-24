@@ -142,10 +142,23 @@ uninstall → removes owned bridge files/registration, keeps
 doctor/status → read-only, safe to run any time (also with --offline)
 ```
 
+## Spicetify installation policy
+
+- Automatic installation uses **winget only**, pinned to package
+  `Spicetify.Spicetify` from the `winget` source with an exact id match.
+- The unsigned upstream `install.ps1` (mutable `main`-branch content with no
+  published signature or checksum) is **never downloaded or executed
+  automatically**. A checksum of a downloaded copy could only prove what was
+  fetched, not that it is genuine, so it is not used as authentication.
+- Without winget, setup stops the automatic path and prints the official
+  manual instructions (`https://spicetify.app/docs/getting-started`), then
+  offers a recheck. Cancellation leaves no changes; a failed attempt prints
+  the manual path instead of retrying another source silently.
+
 ## Update policy
 
 - **Pin the exact plugin version** in the global registration
-  (`opencode-spotify@0.6.0`, never a range or `latest` tag). The plugin and
+  (`opencode-spotify@0.6.0-beta.1`, never a range or `latest` tag). The plugin and
   the installed bridge move as a pair: a floating spec can silently pair a new
   plugin with a stale bridge (or vice versa) and produce protocol mismatches.
 - **No silent Spotify changes.** The updater never applies `spicetify apply`,
@@ -161,6 +174,11 @@ doctor/status → read-only, safe to run any time (also with --offline)
 - Bridge protocol **2 / handshake auto-1** (see [PROTOCOL.md](PROTOCOL.md)).
 - Minimum **OpenCode 2.3.0**, minimum **Spicetify 2.0.0** (enforced by the
   CLI compatibility check; older versions report `too-old`, never silently).
+  Native `opencode plugin add/remove/list/update` and the one-entry
+  server+TUI package contract are verified live on OpenCode 2.4.1; 2.3.0
+  support follows the official plugin-management and multi-part package
+  documentation, and the installer refuses to mutate on anything older
+  without an upgrade.
 - V0.6.x keeps the V0.5.7 wire protocol and storage keys (`lyrics-v0.4`
   settings are retained).
 

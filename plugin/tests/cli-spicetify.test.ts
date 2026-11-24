@@ -12,7 +12,8 @@ import {
   upgradeSpicetify,
   applySpicetify,
   SPOTIFY_STORE_QUERY,
-  SPICETIFY_INSTALL_SCRIPT_URL,
+  SPICETIFY_MANUAL_URL,
+  SPICETIFY_WINGET_ID,
 } from "../src/cli/spicetify.ts";
 
 interface FakeOptions {
@@ -342,95 +343,39 @@ test("winget install requires approval and dry-run plans without executing", asy
   }
 });
 
-test("script install downloads, hashes, approves, runs pwsh -File and cleans temp", async () => {
-  const root = await tempRoot("spicetify-script-");
-  const originalFetch = globalThis.fetch;
+test("without winget, automatic install refuses and directs to manual instructions", async () => {
+  const root = await tempRoot("spicetify-manual-");
   try {
-    const tempDir = join(root, "temp");
-    await mkdir(tempDir, { recursive: true });
-    let fetchCalls = 0;
-    const scriptBody = "Write-Host 'spicetify installer'";
-    // @ts-expect-error test double
-    globalThis.fetch = async (url: string) => {
-      fetchCalls++;
-      assert.equal(url, SPICETIFY_INSTALL_SCRIPT_URL);
-      return { ok: true, status: 200, text: async () => scriptBody };
-    };
-    const pwshPath = "C:\\pwsh.exe";
-    let executed: { file: string; args: string[] } | null = null;
     const runtime = createFakeRuntime(root, {
-      env: { TEMP: tempDir, TMP: tempDir, APPDATA: join(root, "Roaming"), LOCALAPPDATA: join(root, "Local") },
-      which: { pwsh: pwshPath },
-      run: (file, args) => {
-        if (file === pwshPath && args.includes("-File")) {
-          executed = { file, args };
-          const tempFile = args[args.indexOf("-File") + 1]!;
-          assert.ok(existsSync(tempFile));
-          assert.equal(readFileSync(tempFile, "utf8"), scriptBody);
-          return { code: 0, stdout: "installed", stderr: "" };
-        }
-        return { code: 1, stdout: "", stderr: "" };
-      },
-    });
-    let details: { method: string; command: string; source: string; checksum?: string } | null = null as { method: string; command: string; source: string; checksum?: string } | null;
-    const result = await installSpicetify(runtime, { available: false } as never, {
-      dryRun: false,
-      approve: async (value) => {
-        details = value;
-        return true;
-      },
-    });
-    assert.equal(result.code, 0);
-    assert.equal(fetchCalls, 1);
-    assert.equal(details?.method, "official-script");
-    assert.equal(details?.source, SPICETIFY_INSTALL_SCRIPT_URL);
-    assert.match(details?.checksum ?? "", /^sha256:[a-f0-9]{64}$/);
-    assert.match(details?.command ?? "", /-File/);
-    assert.ok(executed);
-    const usedTemp = (executed as unknown as { args: string[] }).args[
-      (executed as unknown as { args: string[] }).args.indexOf("-File") + 1
-    ]!;
-    assert.equal(existsSync(usedTemp), false);
-
-    // Refusal cleans temp and never executes.
-    let secondTemp: string | null = null;
-    const refuseRuntime = createFakeRuntime(root, {
-      env: { TEMP: tempDir, TMP: tempDir, APPDATA: join(root, "Roaming"), LOCALAPPDATA: join(root, "Local") },
-      which: { pwsh: pwshPath },
-      run: (file, args) => {
-        if (args.includes("-File")) {
-          secondTemp = args[args.indexOf("-File") + 1]!;
-          throw new Error("must not execute after refusal");
-        }
-        return { code: 1, stdout: "", stderr: "" };
-      },
-    });
-    const refused = await installSpicetify(refuseRuntime, { available: false } as never, {
-      dryRun: false,
-      approve: async () => false,
-    });
-    assert.equal(refused.code, 1);
-    if (secondTemp) assert.equal(existsSync(secondTemp), false);
-
-    // Dry-run never downloads.
-    fetchCalls = 0;
-    const dryRuntime = createFakeRuntime(root, {
-      env: { TEMP: tempDir, APPDATA: join(root, "Roaming"), LOCALAPPDATA: join(root, "Local") },
-      which: { pwsh: pwshPath },
+      env: {},
+      which: {},
       run: () => {
-        throw new Error("dry-run must not execute");
+        throw new Error("must not execute any child process without winget");
       },
     });
-    const dry = await installSpicetify(dryRuntime, { available: false } as never, {
+    assert.equal(SPICETIFY_WINGET_ID, "Spicetify.Spicetify");
+    const dry = await installSpicetify(runtime, { available: false } as never, {
       dryRun: true,
       approve: async () => {
         throw new Error("dry-run must not ask for approval");
       },
     });
-    assert.equal(dry.code, 0);
-    assert.equal(fetchCalls, 0);
+    assert.equal(dry.code, 1);
+    assert.match(dry.error ?? "", /winget/i);
+    assert.match(dry.error ?? "", /manually/i);
+    assert.equal(runtime.calls.length, 0);
+
+    const result = await installSpicetify(runtime, { available: false } as never, {
+      dryRun: false,
+      approve: async () => {
+        throw new Error("must not ask for approval without winget");
+      },
+    });
+    assert.equal(result.code, 1);
+    assert.match(result.error ?? "", /winget/i);
+    assert.match(result.error ?? "", new RegExp(SPICETIFY_MANUAL_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 20)));
+    assert.equal(runtime.calls.length, 0);
   } finally {
-    globalThis.fetch = originalFetch;
     await rm(root, { recursive: true, force: true });
   }
 });

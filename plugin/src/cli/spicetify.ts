@@ -2,7 +2,6 @@
 // Read-only inspection must never modify the system or print secrets.
 // All child processes use argv arrays via Runtime.run (shell:false).
 import { dirname, join } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
 import { MIN_SPICETIFY, parseVersion } from "./compat.ts";
 import type { CommandResult, Logger, Runtime, SpicetifyInfo, SpotifyInfo } from "./types.ts";
 
@@ -10,16 +9,16 @@ import type { CommandResult, Logger, Runtime, SpicetifyInfo, SpotifyInfo } from 
 export const SPOTIFY_STORE_QUERY =
   "Get-AppxPackage -Name SpotifyAB.SpotifyMusic | Select-Object -ExpandProperty InstallLocation";
 
-export const SPICETIFY_INSTALL_SCRIPT_URL =
-  "https://raw.githubusercontent.com/spicetify/cli/main/install.ps1";
 export const SPICETIFY_WINGET_ID = "Spicetify.Spicetify";
 export const SPICETIFY_BRIDGE_FILE = "opencode-spotify-bridge.js";
 
+/** Official manual installation reference (display only; never executed automatically). */
+export const SPICETIFY_MANUAL_URL = "https://spicetify.app/docs/getting-started";
+
 export interface InstallApproval {
-  method: "winget" | "official-script";
+  method: "winget";
   command: string;
   source: string;
-  checksum?: string;
 }
 
 export interface InstallOptions {
@@ -378,9 +377,11 @@ function wingetUpgradeArgs(): string[] {
 }
 
 /**
- * Install Spicetify. Prefers winget; otherwise downloads the official
- * install.ps1 to temp, hashes it, requires approval, then runs it with
- * `pwsh -File`. Never runs without approval. Dry-run plans without executing.
+ * Install Spicetify via winget only. A checksum of a mutable branch-tip
+ * script cannot authenticate it, so the unsigned upstream installer is never
+ * downloaded or executed automatically: without winget the caller is directed
+ * to the official manual instructions. Never runs without approval. Dry-run
+ * plans without executing.
  */
 export async function installSpicetify(
   runtime: Runtime,
@@ -392,120 +393,37 @@ export async function installSpicetify(
   }
 
   const winget = await runtime.which("winget").catch(() => undefined);
-  if (winget) {
-    const command = `winget install --id ${SPICETIFY_WINGET_ID} -e --source winget --accept-package-agreements --accept-source-agreements`;
-    if (opts.dryRun) {
-      return { code: 0, stdout: `Would run: ${command}`, stderr: "" };
-    }
-    const details: InstallApproval = {
-      method: "winget",
-      command,
-      source: `winget (pinned source): ${SPICETIFY_WINGET_ID}`,
-    };
-    opts.log?.out(`Spicetify install: ${details.command}`);
-    opts.log?.out(`Source: ${details.source}`);
-    const approved = await opts.approve(details);
-    if (!approved) {
-      return { code: 1, stdout: "", stderr: "", error: "Spicetify installation declined." };
-    }
-    const result = await runtime.run(winget, wingetInstallArgs(), { timeoutMs: 120_000 });
-    // Re-detect after the attempt (read-only, never throws).
-    try {
-      await inspectSpicetify(runtime);
-    } catch {
-      // Detection failure does not mask the install result.
-    }
-    return result;
-  }
-
-  const pwsh = await runtime.which("pwsh").catch(() => undefined);
-  if (!pwsh) {
+  if (!winget) {
     return {
       code: 1,
       stdout: "",
       stderr: "",
-      error: "PowerShell (pwsh) is required to install Spicetify.",
+      error: `Automatic installation requires winget (${SPICETIFY_WINGET_ID}). Install Spicetify manually from ${SPICETIFY_MANUAL_URL}, then re-run setup and choose recheck.`,
     };
   }
+  const command = `winget install --id ${SPICETIFY_WINGET_ID} -e --source winget --accept-package-agreements --accept-source-agreements`;
   if (opts.dryRun) {
-    return {
-      code: 0,
-      stdout: `Would download ${SPICETIFY_INSTALL_SCRIPT_URL} and run it with pwsh -File.`,
-      stderr: "",
-    };
+    return { code: 0, stdout: `Would run: ${command}`, stderr: "" };
   }
-
-  let scriptText: string;
-  try {
-    const response = await fetch(SPICETIFY_INSTALL_SCRIPT_URL, { signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) {
-      return {
-        code: 1,
-        stdout: "",
-        stderr: "",
-        error: `Spicetify installer download failed (HTTP ${response.status}).`,
-      };
-    }
-    scriptText = await response.text();
-    if (scriptText.length > 1_000_000) {
-      return { code: 1, stdout: "", stderr: "", error: "Spicetify installer download exceeded the size limit." };
-    }
-  } catch (err) {
-    return {
-      code: 1,
-      stdout: "",
-      stderr: "",
-      error: err instanceof Error ? err.message.slice(0, 200) : "Spicetify installer download failed.",
-    };
-  }
-  const checksum = `sha256:${createHash("sha256").update(scriptText, "utf8").digest("hex")}`;
-  const tempBase = runtime.env.TEMP || runtime.env.TMP || runtime.cwd;
-  const tempFile = join(tempBase, `spicetify-install-${runtime.now()}-${randomUUID().slice(0, 8)}.ps1`);
-  try {
-    runtime.writeText(tempFile, scriptText);
-  } catch (err) {
-    return {
-      code: 1,
-      stdout: "",
-      stderr: "",
-      error: err instanceof Error ? err.message.slice(0, 200) : "Cannot stage Spicetify installer.",
-    };
-  }
-
-  const command = `pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${tempFile}`;
   const details: InstallApproval = {
-    method: "official-script",
+    method: "winget",
     command,
-    source: SPICETIFY_INSTALL_SCRIPT_URL,
-    checksum,
+    source: `winget (pinned source): ${SPICETIFY_WINGET_ID}`,
   };
-  try {
-    opts.log?.out(`Spicetify install: ${details.command}`);
-    opts.log?.out(`Source: ${details.source} (official spicetify/cli installer, branch tip, no signature published)`);
-    opts.log?.out(`Checksum (of the downloaded file only, not a signature): ${checksum}`);
-    opts.log?.out(`Execution runs with -ExecutionPolicy Bypass because the script is unsigned; prefer winget or manual review when possible.`);
-    const approved = await opts.approve(details);
-    if (!approved) {
-      return { code: 1, stdout: "", stderr: "", error: "Spicetify installation declined." };
-    }
-    const result = await runtime.run(
-      pwsh,
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", tempFile],
-      { timeoutMs: 120_000 },
-    );
-    try {
-      await inspectSpicetify(runtime);
-    } catch {
-      // Detection failure does not mask the install result.
-    }
-    return result;
-  } finally {
-    try {
-      runtime.remove(tempFile);
-    } catch {
-      // Best-effort cleanup; installer output remains authoritative.
-    }
+  opts.log?.out(`Spicetify install: ${details.command}`);
+  opts.log?.out(`Source: ${details.source}`);
+  const approved = await opts.approve(details);
+  if (!approved) {
+    return { code: 1, stdout: "", stderr: "", error: "Spicetify installation declined." };
   }
+  const result = await runtime.run(winget, wingetInstallArgs(), { timeoutMs: 120_000 });
+  // Re-detect after the attempt (read-only, never throws).
+  try {
+    await inspectSpicetify(runtime);
+  } catch {
+    // Detection failure does not mask the install result.
+  }
+  return result;
 }
 
 /**

@@ -17,11 +17,19 @@
  *
  * Run from the package directory: `node scripts/verify-package.mjs`
  * or via `npm run verify:package`.
+ *
+ * Release mode retains the exact verified tarball instead of deleting it:
+ * `node scripts/verify-package.mjs --keep-dir <dir>` copies the verified
+ * `.tgz` plus `.sha256` and `.integrity` sidecars into `<dir>`, or pass an
+ * already-built tarball with `node scripts/verify-package.mjs --tarball
+ * <path> [--keep-dir <dir>]` to verify that exact file. The publish workflow
+ * must use the retained, digest-verified artifact — never pack a second,
+ * different tarball afterwards.
  */
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync, copyFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,6 +104,19 @@ function readTarballFile(tgzPath, wanted) {
 }
 
 function main() {
+  const argv = process.argv.slice(2);
+  const flagValue = (name) => {
+    const index = argv.indexOf(name);
+    return index >= 0 && index + 1 < argv.length ? argv[index + 1] : null;
+  };
+  const keepDir = flagValue("--keep-dir");
+  let tarballArg = flagValue("--tarball");
+  const unknown = argv.filter((arg, index) => arg.startsWith("--") && arg !== "--keep-dir" && arg !== "--tarball" &&
+    argv[index - 1] !== "--keep-dir" && argv[index - 1] !== "--tarball");
+  if (unknown.length) {
+    process.stderr.write(`verify-package: unknown option(s): ${unknown.join(" ")}\n`);
+    return 1;
+  }
   process.stdout.write("verify-package: packing opencode-spotify (no publish)\n");
   const manifest = JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8"));
   process.stdout.write("verify-package: building compiled CLI\n");
@@ -123,15 +144,27 @@ function main() {
   const probeCwd = mkdtempSync(join(tmpdir(), "spotify-probe-"));
   let tarballPath = null;
   try {
-    const packed = JSON.parse(run(NPM, ["pack", "--json", "--pack-destination", packDir, "--ignore-scripts"]));
-    const filename = packed?.[0]?.filename;
-    check(typeof filename === "string" && filename.endsWith(".tgz"),
-      `npm pack produced a tarball (${filename ?? "none"})`);
-    if (!filename) return 1;
-    tarballPath = join(packDir, filename);
-    check(existsSync(tarballPath), `tarball exists at ${tarballPath}`);
-    const digest = createHash("sha256").update(readFileSync(tarballPath)).digest("hex");
-    process.stdout.write(`  tarball: ${filename} (sha256 ${digest.slice(0, 16)}…)\n`);
+    if (tarballArg) {
+      tarballPath = resolve(pluginRoot, tarballArg);
+      check(existsSync(tarballPath), `prebuilt tarball exists at ${tarballPath}`);
+      if (!existsSync(tarballPath)) return 1;
+      process.stdout.write(`  prebuilt tarball: ${tarballPath}\n`);
+    } else {
+      const packed = JSON.parse(run(NPM, ["pack", "--json", "--pack-destination", packDir, "--ignore-scripts"]));
+      const filename = packed?.[0]?.filename;
+      check(typeof filename === "string" && filename.endsWith(".tgz"),
+        `npm pack produced a tarball (${filename ?? "none"})`);
+      if (!filename) return 1;
+      tarballPath = join(packDir, filename);
+      check(existsSync(tarballPath), `tarball exists at ${tarballPath}`);
+    }
+    const tarballBytes = readFileSync(tarballPath);
+    const digest = createHash("sha256").update(tarballBytes).digest("hex");
+    const integrity = `sha512-${createHash("sha512").update(tarballBytes).digest("base64")}`;
+    const size = statSync(tarballPath).size;
+    process.stdout.write(`  tarball: ${tarballPath} (${size} bytes)\n`);
+    process.stdout.write(`  sha256: ${digest}\n`);
+    process.stdout.write(`  integrity: ${integrity}\n`);
 
     // Never resolve the published name: from here on only the local file path.
     check(!tarballPath.includes("node_modules"), "tarball path is a local pack, not a registry resolution");
@@ -297,10 +330,33 @@ function main() {
   } catch (error) {
     failures.push(error instanceof Error ? `exception: ${error.message}` : `exception: ${String(error)}`);
   } finally {
+    if (!failures.length && keepDir && tarballPath) {
+      try {
+        const resolvedKeepDir = resolve(pluginRoot, keepDir);
+        mkdirSync(resolvedKeepDir, { recursive: true });
+        const base = tarballPath.split(/[\\/]/).pop();
+        const kept = join(resolvedKeepDir, base);
+        copyFileSync(tarballPath, kept);
+        const keptBytes = readFileSync(kept);
+        const keptDigest = createHash("sha256").update(keptBytes).digest("hex");
+        const keptIntegrity = `sha512-${createHash("sha512").update(keptBytes).digest("base64")}`;
+        writeFileSync(`${kept}.sha256`, `${keptDigest}  ${base}\n`);
+        writeFileSync(`${kept}.integrity`, `${keptIntegrity}\n`);
+        process.stdout.write(`verify-package: retained exact verified tarball at ${kept}\n`);
+        process.stdout.write(`verify-package: retained sha256 ${keptDigest}\n`);
+        process.stdout.write(`verify-package: retained integrity ${keptIntegrity}\n`);
+      } catch (error) {
+        failures.push(error instanceof Error ? `retain failed: ${error.message}` : `retain failed: ${String(error)}`);
+      }
+    }
     for (const dir of [packDir, installPrefix, probeCwd]) {
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     }
-    process.stdout.write("verify-package: temp pack/install/probe dirs removed\n");
+    if (!failures.length && keepDir && tarballPath) {
+      process.stdout.write("verify-package: temp pack/install/probe dirs removed\n");
+    } else if (!keepDir || failures.length || !tarballPath) {
+      process.stdout.write("verify-package: temp pack/install/probe dirs removed\n");
+    }
   }
 
   if (failures.length) {

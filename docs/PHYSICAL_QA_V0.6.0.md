@@ -92,10 +92,9 @@ the installation.
 ### A. Fresh install without Spicetify
 - [ ] Missing Spicetify is reported accurately.
 - [ ] Automatic, manual, and exit choices appear.
-- [ ] Automatic install shows the method/source and requires
-      confirmation. For the official-script path, the log states the checksum
-      covers the downloaded file only and the script is unsigned; prefer
-      winget or manual install when in doubt.
+- [ ] Automatic install uses winget with a pinned package and source and
+      requires confirmation; without winget, setup directs to manual
+      installation instead of executing a downloaded script.
 - [ ] Cancelling changes nothing.
 - [ ] Completing setup registers the plugin globally and installs the bridge.
 - [ ] `spicetify apply` is a separate confirmation.

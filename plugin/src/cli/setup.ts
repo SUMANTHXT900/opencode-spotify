@@ -59,7 +59,7 @@ export async function ensureSpicetify(ctx: OperationContext): Promise<"ready" | 
       return "failed"
     }
     const selected = await ctx.prompt.choose("How do you want to handle Spicetify?", [
-      { label: "Install Spicetify automatically (verified winget or official installer)", value: "auto" },
+      { label: "Install Spicetify automatically with winget (pinned official package)", value: "auto" },
       { label: "I will install Spicetify manually", value: "manual" },
       { label: "Exit setup without changing anything", value: "skip" },
     ])
@@ -85,13 +85,9 @@ export async function ensureSpicetify(ctx: OperationContext): Promise<"ready" | 
       ui.section("Spicetify installation plan")
       ui.kv("Method", details.method)
       ui.kv("Source", details.source)
-      if (details.checksum) ui.kv("Checksum", details.checksum)
       ui.line(`  Command: ${details.command}`)
       if (options.dryRun) return false
       if (options.nonInteractive) return options.yes
-      if (details.method === "official-script") {
-        return ctx.prompt.confirm("Run the downloaded official Spicetify installer?", { phrase: "INSTALL" })
-      }
       return ctx.prompt.confirm("Install Spicetify using this method?", { defaultYes: false })
     },
   })

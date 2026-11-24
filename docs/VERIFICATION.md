@@ -8,7 +8,7 @@ from V0.5.7; the new work is installer/distribution only.
 | Command from `plugin/` | Result |
 |---|---|
 | `npm run typecheck` | Passed |
-| `npm test` | 161 passed, 0 failed, 0 skipped |
+| `npm test` | 162 passed, 0 failed, 0 skipped |
 | `npm run test:render` | Passed |
 | `npm run test:vt` | Passed |
 | `npm run test:artwork` | Passed |

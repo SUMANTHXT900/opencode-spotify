@@ -163,26 +163,24 @@ jobs:
       - name: Build the compiled CLI
         run: npm run build:cli
 
-      - name: Verify packed package
-        run: node scripts/verify-package.mjs
-
-      - name: Create the exact release tarball
-        run: npm pack --ignore-scripts
-
-      - name: Record tarball digest
-        run: |
-          $tgz = "opencode-spotify-${{ inputs.version }}.tgz"
-          $hash = (Get-FileHash $tgz -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $tgz" | Out-File -FilePath "$tgz.sha256" -Encoding ascii -NoNewline
-          Get-Content "$tgz.sha256"
+      - name: Verify packed package and retain the exact tarball
+        run: node scripts/verify-package.mjs --keep-dir "$env:RUNNER_TEMP/release-artifact"
 
       - name: Upload release tarball and digest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: opencode-spotify-${{ inputs.version }}
+          path: ${{ runner.temp }}/release-artifact/opencode-spotify-${{ inputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release digest sidecars
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-spotify-${{ inputs.version }}-digests
           path: |
-            plugin/opencode-spotify-${{ inputs.version }}.tgz
-            plugin/opencode-spotify-${{ inputs.version }}.tgz.sha256
+            ${{ runner.temp }}/release-artifact/opencode-spotify-${{ inputs.version }}.tgz.sha256
+            ${{ runner.temp }}/release-artifact/opencode-spotify-${{ inputs.version }}.tgz.integrity
           if-no-files-found: error
           retention-days: 30
 
@@ -225,10 +223,18 @@ jobs:
           name: opencode-spotify-${{ inputs.version }}
           path: dist
 
-      - name: Verify tarball digest
+      - name: Download release digest sidecars
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: opencode-spotify-${{ inputs.version }}-digests
+          path: dist
+
+      - name: Verify tarball digest and integrity
         shell: bash
         working-directory: dist
-        run: sha256sum -c "opencode-spotify-${{ inputs.version }}.tgz.sha256"
+        run: |
+          sha256sum -c "opencode-spotify-${{ inputs.version }}.tgz.sha256"
+          node -e "const fs=require('fs');const crypto=require('crypto');const f='opencode-spotify-${{ inputs.version }}.tgz';const want=fs.readFileSync(f+'.integrity','utf8').trim();const got='sha512-'+crypto.createHash('sha512').update(fs.readFileSync(f)).digest('base64');if(got!==want){console.error('integrity mismatch');process.exit(1)}console.log('integrity ok')"
 
       - name: Require an existing npm package (OIDC cannot bootstrap)
         shell: bash
