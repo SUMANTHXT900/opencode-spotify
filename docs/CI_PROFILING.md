@@ -16,23 +16,39 @@
   - `npm pack --dry-run` vs real pack both run serially.
   - `npm audit` serial at the end.
 
-## Optimized design (applied)
+## Optimized design (applied; Windows-only, 2 parallel jobs)
 
-Four parallel jobs, each with npm caching (`setup-node` cache),
+Two `windows-2025` jobs, each with npm caching (`setup-node` cache),
 per-job timeouts, `concurrency.cancel-in-progress` (never on `main`),
-and `paths` filters (docs-only changes skip CI):
+and `paths` filters (docs-only changes skip CI). No Linux/macOS jobs: the
+installer, rendering assertions and packed provisioner smoke are
+Windows-specific by design.
 
-| Job | Runner | Steps | Purpose |
+| Job | Timeout | Steps | Purpose |
 |---|---|---|---|
-| fast-checks | ubuntu-latest (5 min) | ci, typecheck, bridge `--check`, pack dry-run, audit | Platform-independent gates, cheapest minutes |
-| unit-windows | windows-2025 (8 min) | ci, `test:fast` (27 files) | Fast OS-specific feedback |
-| render-windows | windows-2025 (8 min) | ci + Bun 1.3.14 + Bun cache, render/vt/artwork | VT stays on Windows (ConPTY width model) |
-| pack-windows | windows-2025 (10 min) | ci, build:cli ×1, `verify-package` ×1 | Single release gate |
+| checks-unit | 8 min | ci, typecheck, bridge `--check`, pack dry-run, audit, `test:fast` (25 files) | Static gates + fast unit feedback, no Bun |
+| render-pack | 12 min | ci, Bun 1.3.14 + Bun cache, render/vt/artwork, `test:bun`, `verify-package` ×1 | Bun-native suites + single release gate |
 
-De-duplication: `test:vt` runs once (render job); `verify-package` runs once
-(pack job); `pack --dry-run` only in fast-checks; `audit` once in fast-checks
-(same `--audit-level=high` fail policy). Coverage preserved: every gate still
-runs exactly once.
+`test:fast` excludes the packaging fixtures (packaging is verified once in
+render-pack) and the Bun-native suites (`artwork.test.ts`,
+`layout-render.test.ts` shell out to `bun`, which the unit job deliberately
+lacks — proven by run #6). `test:bun` runs exactly those two files in the
+Bun job. `test:vt` runs once; `verify-package` (which builds `dist/` itself)
+runs once; `pack --dry-run` and `audit` run once in checks-unit (same
+`--audit-level=high` fail policy). Coverage preserved: every gate still runs
+exactly once; per-job `npm ci` is the only duplication, kept cheap by the
+npm cache (a shared-workspace artifact would cost more in upload/download
+than a warm cache restore).
+
+Run #6 post-mortem (commit 8483fc6, 4-job design with a Linux job): three
+independent defects, all fixed before rerun — (1) `actions/cache` SHA did
+not resolve (replaced with the published v4 SHA, verified via API);
+(2) fresh `npm ci` skipped the optional TUI peers, so Linux typecheck and
+the Windows unit job failed (`solid-js`/`@opentui` types, `artwork.test.ts`
+needs `bun`); fixed by pinning the dev-time renderer stack in
+`devDependencies` (consumers unaffected); (3) `artwork`/`layout-render`
+tests require `bun` and moved to the Bun job via `test:bun`. The
+`pack-windows` job passed in run #6 (3m24s), confirming packaging was green.
 
 ## How to benchmark (pending hosted runs)
 
@@ -41,15 +57,30 @@ Local validation first (no hosted workflow spam):
 ```powershell
 Set-Location plugin
 npm run typecheck
-npm run test:fast          # fast subset (target ~1 min warm)
+npm run test:fast          # Bun-less fast subset (25 files)
+npm run test:bun            # Bun-native suites (needs Bun on PATH)
 npm run test:render; npm run test:vt; npm run test:artwork
 node scripts/verify-package.mjs   # single full pack gate
 ```
 
+## Hosted run history (main branch)
+
+- Run #6 (commit 8483fc6, superseded 4-job design with Linux job): failed —
+  bad `actions/cache` SHA, missing types on fresh `npm ci` (optional peers),
+  `artwork.test.ts` shelling to absent `bun` in the Bun-less unit job.
+  `pack-windows` passed (3m24s).
+- Run #7 (commit c3bc577, devDeps + cache-SHA fix): fast-checks PASS (28s),
+  render PASS (2m3s), pack PASS (3m31s), unit FAIL (same `bun` ENOENT —
+  fixed by moving Bun-native suites to `test:bun` in render-pack).
+- Before/after vs the 19m51s and 15m24s serial baselines: the parallel wall
+  is now bounded by render-pack (~6 min cold-estimate); per-job medians and
+  cache hit/miss rates still to be collected from the new 2-job runs
+  (3× warm + 1× cold proposed; not yet executed — no hosted spam).
+
 Then run the new CI 3× warm (cache hit) + 1× cold (cache-busted) and record
 medians: per-step timings, cache hit rates, wall-clock (slowest job), and
-total runner minutes. Targets: warm wall ≤3 min, cold ≤5 min (stretch;
-pack-windows is the expected critical path). If missed, the remaining
+total runner minutes. Targets: warm wall ≤6 min, cold ≤9 min
+(render-pack is the expected critical path). If missed, the remaining
 bottleneck and the fastest reliable alternative must be reported — checks
 are never skipped for timing.
 

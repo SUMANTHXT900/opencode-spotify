@@ -1,12 +1,17 @@
 version: 2
+# Scheduled version updates are PAUSED until the stable V0.6.0 release.
+# open-pull-requests-limit: 0 disables version-update PRs only; Dependabot
+# security updates use a separate fixed limit and are unaffected, and
+# Dependabot alerts keep reporting. Re-enable after stable by restoring a
+# non-zero limit (weekly cadence below) following reviewed QA.
 updates:
   - package-ecosystem: npm
     directory: /plugin
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0

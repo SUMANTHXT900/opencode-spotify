@@ -1,5 +1,9 @@
 name: CI
 
+# Windows-only verification for the V0.6.0 prerelease line. No Linux or macOS
+# jobs: the installer, Spicetify handling, rendering assertions and the packed
+# provisioner smoke are Windows-specific by design.
+
 on:
   push:
     branches: [main]
@@ -21,13 +25,13 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  fast-checks:
-    name: Fast checks (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  checks-unit:
+    name: Static checks and unit tests (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 8
     defaults:
       run:
-        shell: bash
+        shell: pwsh
         working-directory: plugin
     steps:
       - name: Check out source
@@ -59,39 +63,15 @@ jobs:
       - name: Audit dependencies (fail on high or critical)
         run: npm audit --audit-level=high
 
-  unit-windows:
-    name: Unit tests (Windows, fast subset)
-    runs-on: windows-2025
-    timeout-minutes: 8
-    defaults:
-      run:
-        shell: pwsh
-        working-directory: plugin
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.12.0'
-          cache: npm
-          cache-dependency-path: plugin/package-lock.json
-
-      - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit
-
-      # Slow packaging fixtures (package-smoke, verify-artifact) and the
-      # VT emission harness run once in the pack/render jobs below.
-      - name: Run fast unit tests (excludes packaging + VT)
+      # Fast subset only. Packaging fixtures (package-smoke, verify-artifact)
+      # and Bun-native suites (artwork, layout-render, VT) run in render-pack.
+      - name: Run fast unit tests (excludes packaging, VT and Bun-native suites)
         run: npm run test:fast
 
-  render-windows:
-    name: Rendering checks (Windows + Bun)
+  render-pack:
+    name: Rendering and package verification (Windows + Bun)
     runs-on: windows-2025
-    timeout-minutes: 8
+    timeout-minutes: 12
     defaults:
       run:
         shell: pwsh
@@ -134,33 +114,14 @@ jobs:
       - name: Verify artwork
         run: npm run test:artwork
 
-  pack-windows:
-    name: Package verification (Windows, once)
-    runs-on: windows-2025
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: pwsh
-        working-directory: plugin
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      # Bun-native unit suites: they shell out to `bun`, so they live with the
+      # Bun toolchain instead of the Bun-less unit job.
+      - name: Run Bun-native unit suites
+        run: npm run test:bun
 
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.12.0'
-          cache: npm
-          cache-dependency-path: plugin/package-lock.json
-
-      - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit
-
-      # Single full verification (builds, packs, exact file list, isolated
-      # install, bin --version/--help, packed provisioner smoke). The script
-      # builds dist/ itself immediately before packing; a separate build step
-      # would compile the same sources twice. No artifact upload.
+      # Single full verification: builds dist/, packs, asserts the exact file
+      # list, installs into an isolated prefix, runs bin --version/--help and
+      # the packed provisioner smoke. No artifact upload; release.yml retains
+      # the digest-verified tarball at publish time.
       - name: Verify packed package
         run: node scripts/verify-package.mjs

@@ -1,14 +1,16 @@
 # OpenCode Spotify verification
 
-## V0.6.0-beta.2 verification (in progress, uncommitted)
+## V0.6.0-beta.2 verification (committed: 8483fc6 + c3bc577)
 
-Working tree is on `main` past `469dd8b` with beta.2 changes uncommitted.
-Automated gates so far: `npm run typecheck` clean; `npm run test:fast`
-(171 passing, excludes the three slow fixtures); full `npm test` pending in
-this run (baseline 162 passed pre-change; beta.2 adds 12 regression tests).
-See `docs/CI_PROFILING.md` for the 4-job CI design and `docs/V0.6.0_RELEASE_NOTES.md`
-for the beta.2 scope. Physical QA gates in `docs/PHYSICAL_QA_V0.6.0.md §8`
-are developer-run and not claimed here.
+Beta.2 is committed on `main` past `469dd8b`. Automated gates: `npm run
+typecheck` clean; full `npm test` 180/180 pass; `test:render`, `test:vt`,
+`test:artwork` pass; `node --check` bridge pass; `npm run verify-package`
+PASSED with retained tarball + sidecars under
+`release-artifacts/v0.6.0-beta.2/`. See `docs/CI_PROFILING.md` for the
+Windows-only 2-job CI design and `docs/V0.6.0_RELEASE_NOTES.md` for the
+beta.2 scope. Physical QA gates in `docs/PHYSICAL_QA_V0.6.0.md §8` are
+developer-run and not claimed here. Hosted CI history (runs #6–#7) is
+recorded in `docs/CI_PROFILING.md`.
 
 ## V0.6.0 distribution verification
 
