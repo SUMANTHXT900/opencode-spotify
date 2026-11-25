@@ -1,4 +1,4 @@
-# V0.6.0-beta.1 developer physical QA (Windows)
+# V0.6.0-beta.2 developer physical QA (Windows)
 
 This checklist is performed by the developer, not by an agent. It begins only
 after a prerelease is published and `npx` can fetch it. Automated tests and the
@@ -73,13 +73,13 @@ OpenCode configuration.
 ## 4. Install from the real registry
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.1
+npx opencode-spotify@0.6.0-beta.2
 ```
 
 Also verify the explicit form and the beta tag form:
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.1 setup
+npx opencode-spotify@0.6.0-beta.2 setup
 npx opencode-spotify@beta setup
 ```
 
@@ -170,7 +170,6 @@ npx opencode-spotify@beta uninstall
 - Repeat the relevant tests.
 
 ## 7. Stable promotion
-
 Only after every check above passes:
 
 ```powershell
@@ -180,3 +179,30 @@ npm dist-tag add opencode-spotify@0.6.0 latest
 Use the same reviewed stable artifact that passed the registry QA. Do not
 promote an artifact that was not installed from the registry. Record the tag
 change and the QA evidence in `docs/VERIFICATION.md`.
+
+## 8. Beta.2-specific gates (must all pass before beta.2 publish)
+
+- [ ] Fresh install without backup: `spicetify apply` succeeds via automatic
+      backup-first (no manual `spicetify backup` needed); existing valid
+      backups are not overwritten.
+- [ ] Registration failure recovery: kill/slow `opencode plugin add` still
+      reconciles (recovered vs failed vs unknown) with no blind retry; a
+      timed-out list reports "unknown", never "absent".
+- [ ] Doctor while OpenCode is busy: registration check reports inspection
+      failure distinctly from "not registered".
+- [ ] `status` with registry `latest` pointing at a prerelease reports
+      "Latest stable: none published", never mislabels the beta as stable.
+- [ ] Narrow sidebar (short heights): connection errors show the concise
+      label (e.g. "Config error") and remain readable; recovery guidance is
+      actionable.
+- [ ] Confirmation UX: invalid y/n input re-prompts with accepted values;
+      default stays "no"; cancellation reports completed/pending/skipped.
+- [ ] Coexistence: with both global and local `./plugin` configured, the
+      installer warns, never edits project config, and documents the
+      duplicate-ID limitation (remove one entry; restart OpenCode).
+- [ ] Unified menu: setup/update offer update-both / plugin-only /
+      Spicetify-only / repair / continue / exit as applicable; Spicetify-only
+      upgrades the CLI via its owner method and re-syncs the bridge.
+- [ ] Winget drift: when Winget lags upstream, setup/update display the
+      discrepancy and proceed with the trusted Winget package (no unsigned
+      scripts); post-install versions are verified.

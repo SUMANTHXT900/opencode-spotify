@@ -235,8 +235,11 @@ test("uninstall args include operation, -Yes, -SkipApply and -SpicetifyPath", as
 test("applyBridge runs fixed spicetify apply", async () => {
   const root = await mkdtemp(join(tmpdir(), "bridge-apply-"));
   try {
+    // Valid backup present: apply runs directly without a backup step.
+    const { local } = await makeDirs(root);
+    await mkdir(join(local, "spicetify", "Backup"), { recursive: true });
     const explicit = createFakeRuntime(root, {
-      env: {},
+      env: { LOCALAPPDATA: local },
       which: {},
       run: (file, args) => {
         assert.equal(file, "C:\\sp.exe");
@@ -248,7 +251,7 @@ test("applyBridge runs fixed spicetify apply", async () => {
     assert.equal(ok.code, 0);
 
     const viaPath = createFakeRuntime(root, {
-      env: {},
+      env: { LOCALAPPDATA: local },
       which: { spicetify: "C:\\found.exe" },
       run: (file, args) => {
         assert.equal(file, "C:\\found.exe");
@@ -258,6 +261,30 @@ test("applyBridge runs fixed spicetify apply", async () => {
     });
     const second = await applyBridge(viaPath, {});
     assert.equal(second.code, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("applyBridge creates a missing backup first and retries backup errors once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-apply-backup-"));
+  try {
+    const { local } = await makeDirs(root);
+    const seen: string[][] = [];
+    const missing = createFakeRuntime(root, {
+      env: { LOCALAPPDATA: local },
+      which: {},
+      run: (file, args) => {
+        seen.push([file, ...args]);
+        if (args[0] === "backup") return { code: 0, stdout: "backup ok", stderr: "" };
+        assert.deepEqual(args, ["apply"]);
+        return { code: 0, stdout: "applied", stderr: "" };
+      },
+    });
+    const first = await applyBridge(missing, { spicetifyPath: "C:\\sp.exe" });
+    assert.equal(first.code, 0);
+    assert.ok(seen.some((call) => call.includes("backup")), "missing backup runs backup first");
+    assert.ok(seen.some((call) => call.includes("apply")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

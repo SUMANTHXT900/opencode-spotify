@@ -34,6 +34,8 @@ export async function detectEnvironment(runtime: Runtime): Promise<Detection> {
     ? isAtLeast(spicetify.version, MIN_SPICETIFY) === true ? "ok"
       : isAtLeast(spicetify.version, MIN_SPICETIFY) === false ? "too-old" : "unknown"
     : "unknown"
+  // B08: an unsuccessful inspection is "unknown", never proof of "absent".
+  const pluginState = opencode.plugin.state ?? (opencode.plugin.registered ? "registered" : "absent")
   return {
     windows: runtime.platform === "win32",
     windowsVersion: windowsVersion(runtime),
@@ -52,7 +54,7 @@ export async function detectEnvironment(runtime: Runtime): Promise<Detection> {
       opencode: opencodeCompat,
       spicetify: spicetifyCompat,
       bridge: bridgeCompatibility({ pluginVersion: opencode.plugin.version ?? "0.0.0", bridgeInstalled: bridge.installed, bridgeRegistration: bridge.registration }),
-      plugin: opencode.plugin.registered ? "ok" : "missing",
+      plugin: pluginState === "registered" ? "ok" : pluginState === "unknown" ? "unknown" : "missing",
     },
   }
 }

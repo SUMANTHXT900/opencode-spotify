@@ -3,6 +3,7 @@
 // All child processes use argv arrays via Runtime.run (shell:false).
 import { dirname, join } from "node:path";
 import { MIN_SPICETIFY, parseVersion } from "./compat.ts";
+import { OPERATION_TIMEOUTS } from "./runtime.ts";
 import type { CommandResult, Logger, Runtime, SpicetifyInfo, SpotifyInfo } from "./types.ts";
 
 /** Fixed Store/Appx query. This constant must never include user input. */
@@ -97,7 +98,7 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
         const result = await runtime.run(
           winget,
           ["list", "--id", SPICETIFY_WINGET_ID, "-e"],
-          { timeoutMs: 8000 },
+          { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect },
         );
         if (result.code === 0 && /spicetify/i.test(result.stdout)) return "winget";
       } catch { /* probe failure means not winget */ }
@@ -107,7 +108,7 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
     const scoop = await runtime.which("scoop");
     if (scoop) {
       try {
-        const result = await runtime.run(scoop, ["list", "spicetify"], { timeoutMs: 8000 });
+        const result = await runtime.run(scoop, ["list", "spicetify"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
         if (result.code === 0 && /spicetify/i.test(result.stdout)) return "scoop";
       } catch { /* ignore */ }
     }
@@ -119,7 +120,7 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
         const result = await runtime.run(
           choco,
           ["list", "spicetify", "--local-only"],
-          { timeoutMs: 8000 },
+          { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect },
         );
         if (result.code === 0 && /spicetify/i.test(result.stdout)) return "choco";
       } catch { /* ignore */ }
@@ -171,7 +172,7 @@ export async function inspectSpotify(runtime: Runtime): Promise<SpotifyInfo> {
         const result = await runtime.run(
           pwsh,
           ["-NoProfile", "-NonInteractive", "-Command", SPOTIFY_STORE_QUERY],
-          { timeoutMs: 8000 },
+          { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect },
         );
         if (result.code === 0) {
           const location = result.stdout
@@ -214,7 +215,7 @@ export async function inspectSpotify(runtime: Runtime): Promise<SpotifyInfo> {
     const spicetifyCmd = await runtime.which("spicetify");
     if (spicetifyCmd) {
       try {
-        const result = await runtime.run(spicetifyCmd, ["path", "spotify"], { timeoutMs: 8000 });
+        const result = await runtime.run(spicetifyCmd, ["path", "spotify"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
         if (result.code === 0) {
           const reported = lastNonEmptyLine(result.stdout);
           if (reported) {
@@ -282,7 +283,7 @@ export async function inspectSpicetify(runtime: Runtime): Promise<SpicetifyInfo>
 
   let version: string | null = null;
   try {
-    const result = await runtime.run(exe, ["-v"], { timeoutMs: 8000 });
+    const result = await runtime.run(exe, ["-v"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
     version = extractVersion(`${result.stdout}\n${result.stderr}`);
   } catch {
     version = null;
@@ -290,14 +291,14 @@ export async function inspectSpicetify(runtime: Runtime): Promise<SpicetifyInfo>
 
   // Best-effort `spicetify path` probe (read-only, fixed argv).
   try {
-    await runtime.run(exe, ["path"], { timeoutMs: 8000 });
+    await runtime.run(exe, ["path"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
   } catch {
     // Optional; config resolution below is authoritative.
   }
 
   let configPath: string | null = null;
   try {
-    const result = await runtime.run(exe, ["-c"], { timeoutMs: 8000 });
+    const result = await runtime.run(exe, ["-c"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
     if (result.code === 0) {
       const last = lastNonEmptyLine(result.stdout);
       if (last) configPath = last;
@@ -416,7 +417,7 @@ export async function installSpicetify(
   if (!approved) {
     return { code: 1, stdout: "", stderr: "", error: "Spicetify installation declined." };
   }
-  const result = await runtime.run(winget, wingetInstallArgs(), { timeoutMs: 120_000 });
+  const result = await runtime.run(winget, wingetInstallArgs(), { timeoutMs: OPERATION_TIMEOUTS.packageInstall });
   // Re-detect after the attempt (read-only, never throws).
   try {
     await inspectSpicetify(runtime);
@@ -478,7 +479,7 @@ export async function upgradeSpicetify(
   if (!approved) {
     return { code: 1, stdout: "", stderr: "", error: "Spicetify upgrade declined." };
   }
-  return runtime.run(file, args, { timeoutMs: 120_000 });
+  return runtime.run(file, args, { timeoutMs: OPERATION_TIMEOUTS.packageInstall });
 }
 
 /**
@@ -499,5 +500,95 @@ export async function applySpicetify(
     };
   }
   const exe = path ?? (await runtime.which("spicetify").catch(() => undefined)) ?? "spicetify";
-  return runtime.run(exe, ["apply"], { timeoutMs: 60_000 });
+  return runtime.run(exe, ["apply"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyApply });
+}
+
+/**
+ * Best-effort backup-state detection (B09). `spicetify apply` on a fresh
+ * install fails when no initial Spotify backup exists; overwriting a valid
+ * backup is wasteful. We probe the well-known backup locations without
+ * modifying anything (`%LOCALAPPDATA%/spicetify|Spicetify/Backup`).
+ *
+ * Returns "ready" when a backup directory exists, "missing" when neither
+ * candidate exists, and "unknown" when it cannot be determined. Note: the
+ * Runtime contract exposes existence only, so an empty/partial/stale backup
+ * still reports "ready" here — the apply path compensates by retrying once
+ * on backup-related apply errors (see bridge.ts applyBridge). Never throws.
+ */
+export async function inspectBackupState(
+  runtime: Runtime,
+  spicetify: SpicetifyInfo,
+): Promise<"ready" | "missing" | "unknown"> {
+  try {
+    if (!spicetify.available || !spicetify.path) return "unknown";
+    const localBase = runtime.env.LOCALAPPDATA || join(runtime.homedir, "AppData", "Local");
+    const candidates = [
+      join(localBase, "spicetify", "Backup"),
+      join(localBase, "Spicetify", "Backup"),
+    ];
+    for (const dir of candidates) {
+      try {
+        if (!runtime.exists(dir)) continue;
+        return "ready";
+      } catch {
+        continue;
+      }
+    }
+    return "missing";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Run `spicetify backup` once for a fresh installation (B09). The caller must
+ * have approved the surrounding plan; this function never prompts.
+ */
+export async function backupSpicetify(
+  runtime: Runtime,
+  path: string | null | undefined,
+): Promise<CommandResult> {
+  const exe = path ?? (await runtime.which("spicetify").catch(() => undefined)) ?? "spicetify";
+  return runtime.run(exe, ["backup"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup });
+}
+
+/**
+ * Refresh the Winget source before resolving the trusted package version
+ * (B14–B18). Best-effort and read-only in spirit: `winget source update`
+ * only refreshes metadata, never installs anything. Failures are returned,
+ * never thrown, so the caller can continue with a stale source + warning.
+ */
+export async function refreshWingetSource(runtime: Runtime): Promise<CommandResult> {
+  const winget = await runtime.which("winget").catch(() => undefined);
+  if (!winget) {
+    return { code: 1, stdout: "", stderr: "", error: "winget not found on PATH" };
+  }
+  return runtime.run(winget, ["source", "update", "--name", "winget"], {
+    timeoutMs: OPERATION_TIMEOUTS.managerProbe,
+  });
+}
+
+/**
+ * Resolve the latest available Winget version for the pinned trusted package
+ * id (B14–B18). Anchors to the `Version:` line of `winget show` output so
+ * unrelated version tokens (source/app wrapper text) are not misread.
+ * Returns null when it cannot be determined.
+ */
+export async function wingetLatestVersion(runtime: Runtime): Promise<string | null> {
+  try {
+    const winget = await runtime.which("winget").catch(() => undefined);
+    if (!winget) return null;
+    const result = await runtime.run(
+      winget,
+      ["show", "--id", SPICETIFY_WINGET_ID, "-e", "--source", "winget"],
+      { timeoutMs: OPERATION_TIMEOUTS.managerProbe },
+    );
+    if (result.code !== 0) return null;
+    const text = `${result.stdout}\n${result.stderr}`;
+    const anchored = text.match(/^\s*Version\s*:\s*v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s*$/im);
+    if (anchored?.[1]) return anchored[1];
+    return null;
+  } catch {
+    return null;
+  }
 }

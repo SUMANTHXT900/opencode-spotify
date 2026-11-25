@@ -13,7 +13,7 @@ export interface StatusReport {
     spicetify: { installed: string | null; latest: string | null; error?: string }
   }
   opencode: { path: string | null; version: string | null; globalConfig: string | null; nativePluginCommands: boolean }
-  registration: { registered: boolean; local: boolean; spec: string | null; source: string | null }
+  registration: { registered: boolean; local: boolean; spec: string | null; source: string | null; state?: "registered" | "absent" | "unknown" }
   spotify: { installed: boolean; store: boolean; path: string | null }
   spicetify: { available: boolean; path: string | null; version: string | null; owner: string; configPath: string | null }
   bridge: {
@@ -69,6 +69,7 @@ export function statusReport(ctx: OperationContext): StatusReport {
       local: d.opencode.plugin.local,
       spec: d.opencode.plugin.spec,
       source: d.opencode.plugin.source,
+      state: d.opencode.plugin.state ?? (d.opencode.plugin.registered ? "registered" : "absent"),
     },
     spotify: { installed: d.spotify.installed, store: d.spotify.store, path: d.spotify.path },
     spicetify: {
@@ -100,6 +101,19 @@ export function statusReport(ctx: OperationContext): StatusReport {
   }
 }
 
+/**
+ * Resolve display labels for the plugin registry tags (B05). npm's `latest`
+ * tag may point at a prerelease; never mislabel a beta as "Latest stable".
+ */
+export function resolveChannelLabels(
+  latest: string | null,
+  beta: string | null,
+): { stable: string | null; beta: string | null; stableMissing: boolean } {
+  const stable = latest && !/-/.test(latest) ? latest : null
+  const betaTag = beta ?? (latest && /-/.test(latest) ? latest : null)
+  return { stable, beta: betaTag, stableMissing: !stable && !!betaTag }
+}
+
 export async function runStatus(ctx: OperationContext): Promise<number> {
   const report = statusReport(ctx)
   if (ctx.options.json) {
@@ -113,9 +127,20 @@ export async function runStatus(ctx: OperationContext): Promise<number> {
   ctx.ui.kv("Global config", report.opencode.globalConfig ?? "unknown")
   ctx.ui.kv("Plugin", report.registration.registered
     ? `${report.versions.plugin.installed ?? "unknown"}${report.registration.local ? " (local development)" : ""}`
-    : "not registered")
-  ctx.ui.kv("Latest stable", report.versions.plugin.latest ?? "not published / unknown")
-  if (report.versions.plugin.beta) ctx.ui.kv("Latest beta", report.versions.plugin.beta)
+    : report.registration.state === "unknown"
+      ? "unknown (inspection failed; rerun doctor)"
+      : "not registered")
+  // B05: npm's `latest` tag may point at a prerelease. Never mislabel a beta
+  // as "Latest stable": report stable only when the tag is not a prerelease.
+  const channels = resolveChannelLabels(report.versions.plugin.latest, report.versions.plugin.beta)
+  if (channels.stable) {
+    ctx.ui.kv("Latest stable", channels.stable)
+  } else if (channels.stableMissing) {
+    ctx.ui.kv("Latest stable", "none published (registry latest is a prerelease)")
+  } else {
+    ctx.ui.kv("Latest stable", report.versions.plugin.latest ?? "not published / unknown")
+  }
+  if (channels.beta) ctx.ui.kv("Latest beta", channels.beta)
   ctx.ui.kv("Spotify", report.spotify.installed ? (report.spotify.store ? "Store build detected" : "desktop detected") : "not detected")
   ctx.ui.kv("Spicetify", report.spicetify.available
     ? `${report.spicetify.version ?? "version unknown"} (${report.spicetify.owner})`

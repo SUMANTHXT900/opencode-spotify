@@ -5,6 +5,7 @@
 // subcommands with argv arrays (never a shell string) and return the raw
 // CommandResult so callers can verify the outcome with `plugin list`.
 import type { CommandResult, OpenCodeInfo, Runtime } from "./types.ts"
+import { OPERATION_TIMEOUTS, sanitizeDetail } from "./runtime.ts"
 import { join } from "node:path"
 
 /** Plugin id registered in `opencode plugin list` and in package.json. */
@@ -43,9 +44,13 @@ function finalize(result: CommandResult): CommandResult {
     code: result.code,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
+    ...(result.timedOut ? { timedOut: true as const } : {}),
+    ...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
   }
   if (result.error) merged.error = result.error
-  else if (result.code !== 0) {
+  else if (result.timedOut) {
+    merged.error = `opencode timed out; registration state is unknown until re-listed`
+  } else if (result.code !== 0) {
     merged.error = firstNonEmptyLine(merged.stderr) ?? firstNonEmptyLine(merged.stdout) ?? `opencode exited with code ${result.code}`
   }
   return merged
@@ -147,15 +152,65 @@ export function neutralCwd(runtime: Runtime): string {
 /**
  * Run `opencode plugin list` from `cwd` (argv array, no shell) and parse the
  * rows. Returns [] when the command fails; never throws for command errors.
+ *
+ * B08: the native list can time out on a busy machine. Callers that need to
+ * distinguish "absent" from "unknown" should use listPluginsDetailed.
  */
 export async function listPlugins(runtime: Runtime, cwd?: string): Promise<PluginListEntry[]> {
   const result = await runtime.run(
     "opencode",
     ["plugin", "list"],
-    cwd === undefined ? undefined : { cwd },
+    cwd === undefined ? { timeoutMs: OPERATION_TIMEOUTS.pluginList } : { cwd, timeoutMs: OPERATION_TIMEOUTS.pluginList },
   )
   if (result.code !== 0) return []
   return parsePluginList(result.stdout ?? "")
+}
+
+export type PluginListOutcome = "ok" | "timeout" | "failed"
+
+/**
+ * Detailed list result (B01/B08): preserves timeout status so a failed
+ * inspection is never mistaken for proof the plugin is absent.
+ */
+export async function listPluginsDetailed(
+  runtime: Runtime,
+  cwd?: string,
+): Promise<{ entries: PluginListEntry[]; outcome: PluginListOutcome; detail?: string }> {
+  const result = await runtime.run(
+    "opencode",
+    ["plugin", "list"],
+    cwd === undefined ? { timeoutMs: OPERATION_TIMEOUTS.pluginList } : { cwd, timeoutMs: OPERATION_TIMEOUTS.pluginList },
+  )
+  if (result.code === 0) return { entries: parsePluginList(result.stdout ?? ""), outcome: "ok" }
+  if (result.timedOut) return { entries: [], outcome: "timeout", detail: sanitizeDetail(result.error ?? "plugin list timed out") }
+  const detail = result.error ?? result.stderr.split(/\r?\n/).find((line) => line.trim()) ?? `exit code ${result.code}`
+  return { entries: [], outcome: "failed", detail: sanitizeDetail(detail).slice(0, 200) }
+}
+
+/** Registration tri-state (B08): absent vs verified-absent vs unknown. */
+export type RegistrationState = "registered" | "absent" | "unknown"
+
+/**
+ * Reconcile the observed system state after a mutation reported failure or
+ * timed out (B01). Never blindly retries: a timed-out `plugin add` may have
+ * completed server-side, so the caller must check the list before deciding.
+ *
+ * Returns the observed registration state plus whether the expected spec (or
+ * plugin id) is present.
+ */
+export async function reconcileRegistration(
+  runtime: Runtime,
+  expectedId: string = PLUGIN_ID,
+): Promise<{ state: RegistrationState; match: PluginListEntry | undefined; outcome: PluginListOutcome; detail?: string }> {
+  const listed = await listPluginsDetailed(runtime, neutralCwd(runtime))
+  if (listed.outcome !== "ok") return { state: "unknown", match: undefined, outcome: listed.outcome, detail: listed.detail }
+  const wanted = expectedId.trim().replace(/@\d+\.\d+\.\d+.*$/, "") || PLUGIN_ID
+  const match = listed.entries.find((entry) => {
+    const value = entry.id.replace(/@\d+\.\d+\.\d+.*$/, "")
+    if (value === wanted) return true
+    return (value.split("/").pop() ?? value) === (wanted.split("/").pop() ?? wanted)
+  })
+  return { state: match ? "registered" : "absent", match, outcome: "ok" }
 }
 
 /**
@@ -180,7 +235,11 @@ export async function projectPlugins(runtime: Runtime): Promise<PluginListEntry[
 }
 
 function emptyPlugin(): OpenCodeInfo["plugin"] {
-  return { registered: false, version: null, source: null, local: false, spec: null }
+  return { registered: false, version: null, source: null, local: false, spec: null, state: "absent" }
+}
+
+function unknownPlugin(): OpenCodeInfo["plugin"] {
+  return { registered: false, version: null, source: null, local: false, spec: null, state: "unknown" }
 }
 
 function missing(reason: string): OpenCodeInfo {
@@ -214,7 +273,7 @@ export async function inspectOpenCode(runtime: Runtime): Promise<OpenCodeInfo> {
 
   let version: string | null = null
   try {
-    const result = await runtime.run("opencode", ["--version"])
+    const result = await runtime.run("opencode", ["--version"], { timeoutMs: OPERATION_TIMEOUTS.inspection })
     version = extractVersion(`${result.stdout ?? ""}\n${result.stderr ?? ""}`)
   } catch {
     version = null
@@ -223,7 +282,7 @@ export async function inspectOpenCode(runtime: Runtime): Promise<OpenCodeInfo> {
   let configPath: string | null = null
   let configExists = false
   try {
-    const result = await runtime.run("opencode", ["debug", "paths", "config"])
+    const result = await runtime.run("opencode", ["debug", "paths", "config"], { timeoutMs: OPERATION_TIMEOUTS.inspection })
     const candidate = firstNonEmptyLine(result.stdout)
     if (candidate) {
       const clean = unquote(candidate)
@@ -252,25 +311,34 @@ export async function inspectOpenCode(runtime: Runtime): Promise<OpenCodeInfo> {
   try {
     // List from a neutral directory so project-local plugins resolved from
     // the caller's cwd are not mistaken for the global registration.
-    const match = (await listPlugins(runtime, neutralCwd(runtime))).find((entry) => isPluginId(entry.id))
-    if (match) {
-      const source = match.source.trim() ? unquote(match.source) : ""
-      const local = match.version.trim().toLowerCase() === "local" || isPathLikeSource(source)
-      plugin = {
-        registered: true,
-        version: match.version.trim() || null,
-        source: source || null,
-        local,
-        spec: deriveSpec(match.id, match.version, source),
+    // B08: a timeout/failed list is "unknown", never proof of "absent".
+    const listed = await listPluginsDetailed(runtime, neutralCwd(runtime))
+    if (listed.outcome !== "ok") {
+      plugin = { ...unknownPlugin(), detail: listed.detail }
+    } else {
+      const match = listed.entries.find((entry) => isPluginId(entry.id))
+      if (match) {
+        const source = match.source.trim() ? unquote(match.source) : ""
+        const local = match.version.trim().toLowerCase() === "local" || isPathLikeSource(source)
+        plugin = {
+          registered: true,
+          version: match.version.trim() || null,
+          source: source || null,
+          local,
+          spec: deriveSpec(match.id, match.version, source),
+          state: "registered",
+        }
+      } else {
+        plugin = { ...emptyPlugin(), state: "absent" }
       }
     }
   } catch {
-    plugin = emptyPlugin()
+    plugin = unknownPlugin()
   }
 
   let nativeCommands = false
   try {
-    const result = await runtime.run("opencode", ["plugin", "--help"])
+    const result = await runtime.run("opencode", ["plugin", "--help"], { timeoutMs: OPERATION_TIMEOUTS.inspection })
     const help = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
     nativeCommands = /\badd\b/i.test(help) && /\bremove\b/i.test(help)
   } catch {
@@ -283,7 +351,7 @@ export async function inspectOpenCode(runtime: Runtime): Promise<OpenCodeInfo> {
 function emitLines(log: (line: string) => void, output: string | null | undefined): void {
   if (!output) return
   for (const line of output.split(/\r?\n/)) {
-    if (line.trim()) log(line)
+    if (line.trim()) log(sanitizeDetail(line))
   }
 }
 
@@ -304,7 +372,7 @@ export async function addGlobalPlugin(
 ): Promise<CommandResult> {
   const target = requireSpec(spec)
   if (!target) return { code: 1, stdout: "", stderr: "", error: "plugin spec is required" }
-  const result = await runtime.run("opencode", ["plugin", "add", target])
+  const result = await runtime.run("opencode", ["plugin", "add", target], { timeoutMs: OPERATION_TIMEOUTS.pluginMutation })
   if (opts?.log) {
     emitLines(opts.log, result.stdout)
     emitLines(opts.log, result.stderr)
@@ -316,7 +384,7 @@ export async function addGlobalPlugin(
 export async function removeGlobalPlugin(runtime: Runtime, spec: string): Promise<CommandResult> {
   const target = requireSpec(spec)
   if (!target) return { code: 1, stdout: "", stderr: "", error: "plugin spec is required" }
-  const result = await runtime.run("opencode", ["plugin", "remove", target])
+  const result = await runtime.run("opencode", ["plugin", "remove", target], { timeoutMs: OPERATION_TIMEOUTS.pluginMutation })
   return finalize(result)
 }
 
@@ -327,6 +395,6 @@ export async function removeGlobalPlugin(runtime: Runtime, spec: string): Promis
 export async function updateGlobalPlugin(runtime: Runtime, target?: string): Promise<CommandResult> {
   const name = (target ?? "").trim()
   const args = name ? ["plugin", "update", name] : ["plugin", "update"]
-  const result = await runtime.run("opencode", args)
+  const result = await runtime.run("opencode", args, { timeoutMs: OPERATION_TIMEOUTS.pluginMutation })
   return finalize(result)
 }

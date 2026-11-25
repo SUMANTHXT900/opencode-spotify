@@ -7,6 +7,10 @@ export interface CommandResult {
   stdout: string
   stderr: string
   error?: string
+  /** True when the child was killed by our timeout (not a normal nonzero exit). */
+  timedOut?: boolean
+  /** Wall-clock duration of the child execution in milliseconds. */
+  durationMs?: number
 }
 
 export interface ExecOptions {
@@ -85,6 +89,10 @@ export interface OpenCodeInfo {
     source: string | null
     local: boolean
     spec: string | null
+    /** Tri-state (B08): registered / absent (verified) / unknown (list failed). */
+    state?: "registered" | "absent" | "unknown"
+    /** Sanitized inspection failure detail when state is unknown. */
+    detail?: string
   }
   nativeCommands: boolean
   error?: string

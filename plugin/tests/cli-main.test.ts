@@ -1,14 +1,22 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { main } from "../src/cli/main.ts"
 import { context, fakeLogger, fakePrompt, fakeRuntime, fakeUi } from "./cli-fixture.ts"
+
+function manifestVersion(): string {
+  const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { version?: unknown }
+  assert.equal(typeof manifest.version, "string")
+  return manifest.version as string
+}
 
 test("main prints version and help before environment detection", async () => {
   const runtime = fakeRuntime()
   const log = fakeLogger()
   const ui = fakeUi()
   assert.equal(await main(["--version"], { runtime, log, ui, prompt: fakePrompt() }), 0)
-  assert.deepEqual(log.lines, ["0.6.0-beta.1"])
+  assert.deepEqual(log.lines, [manifestVersion()])
   assert.equal(runtime.calls.length, 0)
 
   const helpLog = fakeLogger()

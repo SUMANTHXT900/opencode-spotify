@@ -162,7 +162,8 @@ test("inspectOpenCode lists global plugins from a neutral cwd", async () => {
   assert.equal(info.plugin.spec, "npm:opencode-spotify@0.6.0")
   assert.equal(info.nativeCommands, true)
   const listCall = runtime.calls.find((call) => call.args.join(" ") === "plugin list")
-  assert.deepEqual(listCall?.options, { cwd: temp })
+  assert.equal(listCall?.options?.cwd, temp)
+  assert.equal(typeof listCall?.options?.timeoutMs, "number")
   // The project cwd must never leak into the global list query.
   assert.ok(!runtime.calls.some((call) => call.options?.cwd === runtime.cwd))
 })
@@ -312,7 +313,9 @@ test("addGlobalPlugin uses exact argv, logs lines, and propagates failure", asyn
   assert.equal(result.code, 0)
   assert.equal(result.stdout, `added ${spec}\n`)
   assert.deepEqual(logged, [`added ${spec}`])
-  assert.deepEqual(runtime.calls, [{ file: "opencode", args: ["plugin", "add", spec], options: undefined }])
+  assert.equal(runtime.calls[0]?.file, "opencode")
+  assert.deepEqual(runtime.calls[0]?.args, ["plugin", "add", spec])
+  assert.equal(typeof runtime.calls[0]?.options?.timeoutMs, "number")
 
   const failing = createFakeRuntime({ onRun: () => fail("registry unreachable\n") })
   const failed = await addGlobalPlugin(failing, spec)
@@ -326,7 +329,8 @@ test("removeGlobalPlugin uses exact argv and propagates failure", async () => {
   const result = await removeGlobalPlugin(runtime, "opencode-spotify")
   assert.equal(result.code, 0)
   assert.equal(result.stdout, "removed\n")
-  assert.deepEqual(runtime.calls, [{ file: "opencode", args: ["plugin", "remove", "opencode-spotify"], options: undefined }])
+  assert.deepEqual(runtime.calls[0]?.args, ["plugin", "remove", "opencode-spotify"])
+  assert.equal(typeof runtime.calls[0]?.options?.timeoutMs, "number")
 
   const failing = createFakeRuntime({ onRun: () => fail("not installed\n") })
   const failed = await removeGlobalPlugin(failing, "opencode-spotify")
@@ -374,7 +378,8 @@ test("listPlugins runs from the given cwd and returns [] on failure", async () =
   assert.deepEqual(await listPlugins(runtime, "C:\\Temp"), [
     { id: "opencode-spotify", version: "0.6.0", source: "npm:opencode-spotify@0.6.0" },
   ])
-  assert.deepEqual(runtime.calls, [{ file: "opencode", args: ["plugin", "list"], options: { cwd: "C:\\Temp" } }])
+  assert.equal(runtime.calls[0]?.options?.cwd, "C:\\Temp")
+  assert.equal(typeof runtime.calls[0]?.options?.timeoutMs, "number")
   const failing = createFakeRuntime({ onRun: () => fail("boom\n") })
   assert.deepEqual(await listPlugins(failing, "C:\\Temp"), [])
 })
@@ -401,7 +406,8 @@ test("projectPlugins lists from runtime.cwd and global inspect stays neutral", a
     { id: "opencode-spotify", version: "local", source: "C:\\dev\\opencode-spotify" },
   ])
   const projectCall = runtime.calls.find((call) => call.args.join(" ") === "plugin list")
-  assert.deepEqual(projectCall?.options, { cwd: projectDir })
+  assert.equal(projectCall?.options?.cwd, projectDir)
+  assert.equal(typeof projectCall?.options?.timeoutMs, "number")
 
   // Global inspect from the same runtime still queries the neutral cwd, so a
   // project-local checkout is not mistaken for the global registration.
@@ -418,8 +424,9 @@ test("projectPlugins lists from runtime.cwd and global inspect stays neutral", a
   })
   const info = await inspectOpenCode(neutralRuntime)
   assert.equal(info.plugin.registered, false)
+  assert.equal(info.plugin.state, "absent")
   const listCall = neutralRuntime.calls.find((call) => call.args.join(" ") === "plugin list")
-  assert.deepEqual(listCall?.options, { cwd: neutral })
+  assert.equal(listCall?.options?.cwd, neutral)
 })
 
 test("projectPlugins returns [] when opencode or the list fails", async () => {

@@ -1,5 +1,15 @@
 # OpenCode Spotify verification
 
+## V0.6.0-beta.2 verification (in progress, uncommitted)
+
+Working tree is on `main` past `469dd8b` with beta.2 changes uncommitted.
+Automated gates so far: `npm run typecheck` clean; `npm run test:fast`
+(171 passing, excludes the three slow fixtures); full `npm test` pending in
+this run (baseline 162 passed pre-change; beta.2 adds 12 regression tests).
+See `docs/CI_PROFILING.md` for the 4-job CI design and `docs/V0.6.0_RELEASE_NOTES.md`
+for the beta.2 scope. Physical QA gates in `docs/PHYSICAL_QA_V0.6.0.md §8`
+are developer-run and not claimed here.
+
 ## V0.6.0 distribution verification
 
 Branch `feat/v0.6.0-distribution`, uncommitted. Player behavior is unchanged

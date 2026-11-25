@@ -4,7 +4,7 @@
 import { lstatSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { BRIDGE_PROTOCOL } from "./compat.ts";
-import { packageRoot } from "./runtime.ts";
+import { packageRoot, OPERATION_TIMEOUTS } from "./runtime.ts";
 import type { BridgeInfo, CommandResult, Runtime, SpicetifyInfo } from "./types.ts";
 
 export const BRIDGE_FILE = "opencode-spotify-bridge.js";
@@ -206,16 +206,84 @@ export async function bridgeOperation(
   if (opts.spicetifyPath) {
     args.push("-SpicetifyPath", opts.spicetifyPath);
   }
-  return runtime.run(pwsh, args, { timeoutMs: 120_000 });
+  return runtime.run(pwsh, args, { timeoutMs: OPERATION_TIMEOUTS.bridge });
 }
 
 /**
  * Run `spicetify apply`. The caller must have confirmed already.
+ *
+ * B09: a fresh install has no initial Spotify backup, so a bare `apply`
+ * fails. When the backup directory looks missing, run `spicetify backup`
+ * once first (never overwriting a valid backup), then apply. When the first
+ * apply fails with a backup-related error, retry once after a backup.
+ * Returns the final apply result; backup output is folded into stdout.
  */
 export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): Promise<CommandResult> {
   const exe =
     opts.spicetifyPath ?? (await runtime.which("spicetify").catch(() => undefined)) ?? "spicetify";
-  return runtime.run(exe, ["apply"], { timeoutMs: 60_000 });
+  // Anchored backup-missing matcher: only genuine "no backup" failures from
+  // `spicetify apply` trigger the retry path — never incidental mentions of
+  // backup paths, files, or unrelated output.
+  const isBackupMissingError = (result: CommandResult): boolean =>
+    /no backup|backup.*(missing|not found|does not exist|not backed up)|need.*backup|must.*backup|backup failed|haven't backed up|have not backed up/i.test(
+      `${result.stdout ?? ""}\n${result.stderr ?? ""}\n${result.error ?? ""}`,
+    );
+  let didBackup = false;
+  const needsBackup = hasMissingBackup(runtime);
+  if (needsBackup) {
+    const backup = await runtime.run(exe, ["backup"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup });
+    if (backup.code !== 0) {
+      return {
+        code: backup.code,
+        stdout: backup.stdout ?? "",
+        stderr: backup.stderr ?? "",
+        error: `Spicetify backup failed before apply: ${backup.error ?? backup.stderr.split(/\r?\n/).find((line) => line.trim()) ?? "unknown error"}`,
+        ...(backup.timedOut ? { timedOut: true as const } : {}),
+      };
+    }
+    didBackup = true;
+  }
+  const first = await runtime.run(exe, ["apply"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyApply });
+  if (first.code === 0 || !isBackupMissingError(first)) {
+    return first;
+  }
+  // Already backed up once for this invocation: do not overwrite again.
+  if (didBackup) {
+    return { ...first, error: `${first.error ?? "spicetify apply failed"} (a backup was already taken; not retrying to avoid overwriting it)` };
+  }
+  // Backup-related failure: ensure a backup exists, then retry once.
+  const backup = await runtime.run(exe, ["backup"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup });
+  if (backup.code !== 0) {
+    return {
+      code: first.code,
+      stdout: first.stdout ?? "",
+      stderr: first.stderr ?? "",
+      error: `${first.error ?? "spicetify apply failed"} (automatic backup also failed: ${backup.error ?? "unknown error"})`,
+      ...(backup.timedOut || first.timedOut ? { timedOut: true as const } : {}),
+      ...(typeof (backup.durationMs ?? first.durationMs) === "number" ? { durationMs: (backup.durationMs ?? first.durationMs) as number } : {}),
+    };
+  }
+  return runtime.run(exe, ["apply"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyApply });
+}
+
+/** True when the well-known Spicetify backup directory is absent (B09). Never throws. */
+function hasMissingBackup(runtime: Runtime): boolean {
+  try {
+    const localBase = runtime.env.LOCALAPPDATA || join(runtime.homedir, "AppData", "Local");
+    const candidates = [join(localBase, "spicetify", "Backup"), join(localBase, "Spicetify", "Backup")];
+    let sawCandidate = false;
+    for (const dir of candidates) {
+      try {
+        if (runtime.exists(dir)) return false;
+        sawCandidate = true;
+      } catch {
+        continue;
+      }
+    }
+    return sawCandidate;
+  } catch {
+    return false;
+  }
 }
 
 /**

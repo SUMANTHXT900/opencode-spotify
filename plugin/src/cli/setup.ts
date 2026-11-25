@@ -1,6 +1,6 @@
 import { detectEnvironment } from "./detect.ts"
-import { addGlobalPlugin, projectPlugins, removeGlobalPlugin } from "./opencode.ts"
-import { installSpicetify } from "./spicetify.ts"
+import { addGlobalPlugin, projectPlugins, reconcileRegistration, removeGlobalPlugin } from "./opencode.ts"
+import { installSpicetify, refreshWingetSource, wingetLatestVersion } from "./spicetify.ts"
 import { bridgeOperation } from "./bridge.ts"
 import { compareVersions, MIN_OPENCODE } from "./compat.ts"
 import { selectPluginTarget } from "./update-plan.ts"
@@ -78,6 +78,23 @@ export async function ensureSpicetify(ctx: OperationContext): Promise<"ready" | 
   }
 
   // Automatic installation. Dry-run only reports the plan.
+  // B14–B18: refresh the Winget source, resolve the trusted package version,
+  // and compare with upstream so a lagging Winget feed is visible.
+  if (!options.dryRun) {
+    ui.line("  Refreshing Winget source metadata (best-effort, no installation)...")
+    const refreshed = await refreshWingetSource(ctx.runtime)
+    if (refreshed.code !== 0) {
+      ui.warn(`Winget source refresh failed; continuing with cached metadata${refreshed.error ? `: ${refreshed.error}` : "."}`)
+    }
+  }
+  const wingetVersion = await wingetLatestVersion(ctx.runtime).catch(() => null)
+  const upstreamVersion = ctx.versions.spicetify.latest
+  const drift = wingetVersion && upstreamVersion ? compareVersions(wingetVersion, upstreamVersion) : null
+  if (drift !== null && drift !== 0) {
+    ui.warn(`Version note: Winget offers Spicetify ${wingetVersion} while upstream reports ${upstreamVersion}. Proceeding with the trusted Winget package; rerun update after the feed catches up.`)
+  } else if (wingetVersion) {
+    ui.line(`  Trusted Spicetify version available via Winget: ${wingetVersion}.`)
+  }
   const result = await installSpicetify(ctx.runtime, ctx.detection.spicetify, {
     dryRun: options.dryRun,
     log: { out: (line) => ui.line(`  ${line}`), err: (line) => ctx.log.err(line) },
@@ -107,7 +124,17 @@ export async function ensureSpicetify(ctx: OperationContext): Promise<"ready" | 
     const ready = await retryPrerequisite(ctx, (detection) => detection.spicetify.available, "Spicetify")
     return ready ? "ready" : "failed"
   }
-  ui.success(`Spicetify ${ctx.detection.spicetify.version ?? "detected"}.`)
+  // Verify the installed version and surface Winget-vs-upstream drift.
+  const installed = ctx.detection.spicetify.version
+  if (installed) {
+    ui.success(`Spicetify ${installed} detected.`)
+    const installedDrift = upstreamVersion ? compareVersions(installed, upstreamVersion) : null
+    if (installedDrift !== null && installedDrift !== 0) {
+      ui.warn(`Installed Spicetify ${installed} differs from upstream ${upstreamVersion}; the Winget feed may lag. No unsigned scripts are used; rerun update later or install manually from ${SPICETIFY_DOCS}.`)
+    }
+  } else {
+    ui.success(`Spicetify detected.`)
+  }
   return "ready"
 }
 
@@ -118,8 +145,25 @@ function registrationStep(ctx: OperationContext, spec: string | null): PlanStep 
     description: `Register ${target} in the global OpenCode configuration (native opencode plugin add)`,
     mutates: true,
     run: async () => {
+      ctx.ui.line(`  Running: opencode plugin add ${target} (up to 90s; progress shown after completion)`)
       const result = await addGlobalPlugin(ctx.runtime, target, { log: (line) => ctx.ui.line(`  ${line}`) })
-      if (result.code !== 0) throw new Error(result.error ?? "opencode plugin add failed")
+      if (result.code === 0) return
+      // B01: a failed or timed-out mutation may have completed server-side.
+      // Reconcile the observed state before deciding success/failure.
+      const reconciled = await reconcileRegistration(ctx.runtime)
+      if (reconciled.state === "registered") {
+        const detail = result.timedOut
+          ? `the registration command timed out but ${reconciled.match?.version ?? "the plugin"} is now listed; treating as recovered`
+          : `the registration command reported failure but the plugin is now listed; treating as recovered`
+        ctx.ui.warn(`${detail}. Detail: ${result.error ?? "unknown error"}`)
+        return
+      }
+      if (reconciled.state === "unknown") {
+        throw new Error(`${result.error ?? "opencode plugin add failed"} (verification also failed: ${reconciled.detail ?? "plugin list did not complete"}; state is unknown, not proven absent)`)
+      }
+      throw new Error(result.timedOut
+        ? `opencode plugin add timed out and the plugin is still absent; rerun setup to retry (no blind retry was attempted). Detail: ${result.error ?? "timeout"}`
+        : (result.error ?? "opencode plugin add failed"))
     },
   }
 }
@@ -138,6 +182,27 @@ function bridgeStep(ctx: OperationContext, operation: "install" | "repair"): Pla
       if (result.code !== 0) throw new Error(result.error ?? `Bridge ${operation} failed`)
     },
   }
+}
+
+function printPrerequisiteSummary(ctx: OperationContext): void {
+  // B06: compact, useful summary. No secrets, no verbosity, no slowness.
+  const d = ctx.detection
+  ctx.ui.section("Environment")
+  ctx.ui.kv("Windows", d.windows ? `${d.windowsVersion} ${d.arch}` : "unsupported (no changes will be made)")
+  ctx.ui.kv("Node.js", d.node)
+  ctx.ui.kv("OpenCode", d.opencode.available ? `${d.opencode.version ?? "version unknown"} (${d.compatibility.opencode})` : "not found")
+  ctx.ui.kv("Spotify", d.spotify.installed ? (d.spotify.store ? "Store build detected" : "desktop detected") : "not detected")
+  ctx.ui.kv("Spicetify", d.spicetify.available ? `${d.spicetify.version ?? "version unknown"} (${d.spicetify.owner})` : "not installed")
+  const pluginSummary = d.opencode.plugin.state === "unknown"
+    ? "unknown (inspection failed)"
+    : d.opencode.plugin.registered
+      ? `${d.opencode.plugin.version ?? "unknown"}${d.opencode.plugin.local ? " (local)" : ""}`
+      : "not registered"
+  ctx.ui.kv("Plugin", pluginSummary)
+  ctx.ui.kv("Bridge", d.compatibility.bridge)
+  const pluginUpdate = ctx.versions.plugin.latest ?? ctx.versions.plugin.latestBeta
+  if (pluginUpdate) ctx.ui.kv("Update", `plugin ${pluginUpdate} available`)
+  else if (ctx.versions.spicetify.latest) ctx.ui.kv("Update", `Spicetify ${ctx.versions.spicetify.latest} available`)
 }
 
 function printFinal(ctx: OperationContext, applied: boolean): void {
@@ -179,10 +244,13 @@ async function maintenance(ctx: OperationContext): Promise<number> {
   }
   const choices: { label: string; value: string }[] = []
   if (detection.opencode.plugin.local) choices.push({ label: "Switch this global registration to the published package", value: "switch" })
-  if (pluginOutdated) choices.push({ label: "Update OpenCode Spotify and its bridge", value: "plugin" })
-  if (pluginOutdated && spicetifyOutdated) choices.push({ label: "Update OpenCode Spotify and Spicetify", value: "both" })
-  if (!detection.opencode.plugin.local) choices.push({ label: "Repair the existing installation", value: "repair" })
-  choices.push({ label: "Show status and continue without updating", value: "continue" })
+  // Unified update/repair experience: adapt to actual state, keep the bridge
+  // synchronized, never mix package managers, never downgrade.
+  if (pluginOutdated && spicetifyOutdated) choices.push({ label: "Update both OpenCode Spotify and Spicetify", value: "both" })
+  if (pluginOutdated) choices.push({ label: "Update OpenCode Spotify only", value: "plugin" })
+  if (spicetifyOutdated) choices.push({ label: "Update Spicetify only", value: "spicetify" })
+  if (!detection.opencode.plugin.local) choices.push({ label: "Repair existing installation", value: "repair" })
+  choices.push({ label: "Continue without updating", value: "continue" })
   choices.push({ label: "Exit", value: "exit" })
   const choice = await ctx.prompt.choose("What would you like to do?", choices)
   if (!choice || choice === "exit") return 0
@@ -210,7 +278,8 @@ async function maintenance(ctx: OperationContext): Promise<number> {
     return (await maybeApplyBridge(ctx, detection.spicetify.path, detection.bridge.registration !== "current")).code
   }
   if (choice === "both") ctx.options.allowSpicetifyUpgrade = true
-  return runUpdate(ctx, choice === "both" ? "both" : "plugin")
+  if (choice === "spicetify") ctx.options.allowSpicetifyUpgrade = true
+  return runUpdate(ctx, choice === "both" ? "both" : choice === "spicetify" ? "spicetify" : "plugin")
 }
 
 /**
@@ -221,6 +290,7 @@ async function maintenance(ctx: OperationContext): Promise<number> {
  */
 export async function runSetup(ctx: OperationContext): Promise<number> {
   const { ui } = ctx
+  printPrerequisiteSummary(ctx)
   if (!ctx.detection.windows) {
     ui.error("V0.6.0 supports Windows only. No changes were made.")
     return 1
@@ -257,6 +327,10 @@ export async function runSetup(ctx: OperationContext): Promise<number> {
   if (spicetify !== "ready") return spicetify === "declined" ? 0 : 1
 
   const detection = ctx.detection
+  if (detection.opencode.plugin.state === "unknown") {
+    ui.error(`Global registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`opencode-spotify doctor\`; no changes were made and no blind retry was attempted.`)
+    return 1
+  }
   if (detection.opencode.plugin.registered && !detection.opencode.plugin.local) return maintenance(ctx)
 
   const localProject = (await projectPlugins(ctx.runtime)).find((entry) => isSpotifyPluginId(entry.id) && /[\\/]/.test(entry.source))
@@ -296,6 +370,10 @@ export async function runSetup(ctx: OperationContext): Promise<number> {
 
   const verified = await detectEnvironment(ctx.runtime)
   refresh(ctx, verified)
+  if (verified.opencode.plugin.state === "unknown") {
+    ui.error(`Global registration state is unknown (inspection failed: ${verified.opencode.plugin.detail ?? "plugin list did not complete"}). Use \`opencode-spotify doctor\` for details; no blind retry was attempted.`)
+    return 1
+  }
   if (!verified.opencode.plugin.registered || verified.opencode.plugin.local) {
     ui.error("Global registration could not be verified. Use `opencode-spotify doctor` for details.")
     return 1

@@ -1,4 +1,4 @@
-import { addGlobalPlugin, removeGlobalPlugin } from "./opencode.ts"
+import { addGlobalPlugin, reconcileRegistration, removeGlobalPlugin } from "./opencode.ts"
 import { bridgeOperation } from "./bridge.ts"
 import { detectEnvironment } from "./detect.ts"
 import { executePlan, maybeApplyBridge, planExitCode, registrationSpec } from "./plan.ts"
@@ -21,6 +21,10 @@ export async function runRepair(ctx: OperationContext): Promise<number> {
   }
   if (!detection.opencode.nativeCommands) {
     ui.error("This OpenCode version lacks native plugin management. Upgrade OpenCode first.")
+    return 1
+  }
+  if (detection.opencode.plugin.state === "unknown") {
+    ui.error(`Global registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`opencode-spotify doctor\`; no changes were made and no blind retry was attempted.`)
     return 1
   }
   const steps: PlanStep[] = []
@@ -46,7 +50,19 @@ export async function runRepair(ctx: OperationContext): Promise<number> {
       mutates: true,
       run: async () => {
         const result = await addGlobalPlugin(ctx.runtime, spec, { log: (line) => ui.line(`  ${line}`) })
-        if (result.code !== 0) throw new Error(result.error ?? "opencode plugin add failed")
+        if (result.code === 0) return
+        // B01: reconcile a failed/timed-out mutation before declaring failure.
+        const reconciled = await reconcileRegistration(ctx.runtime)
+        if (reconciled.state === "registered") {
+          ui.warn(`Registration reported failure but is now listed; treating as recovered. Detail: ${result.error ?? "unknown"}`)
+          return
+        }
+        if (reconciled.state === "unknown") {
+          throw new Error(`${result.error ?? "opencode plugin add failed"} (verification also failed: ${reconciled.detail ?? "plugin list did not complete"})`)
+        }
+        throw new Error(result.timedOut
+          ? `opencode plugin add timed out and the plugin is still absent; rerun repair (no blind retry was attempted). Detail: ${result.error ?? "timeout"}`
+          : (result.error ?? "opencode plugin add failed"))
       },
     })
   }
@@ -84,6 +100,10 @@ export async function runRepair(ctx: OperationContext): Promise<number> {
 
   const next = await detectEnvironment(ctx.runtime)
   ctx.detection = next
+  if (next.opencode.plugin.state === "unknown") {
+    ui.error(`Global registration state is unknown after repair (inspection failed: ${next.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun doctor; no blind retry was attempted.`)
+    return 1
+  }
   if (!next.opencode.plugin.registered || next.opencode.plugin.local) {
     ui.error("Global registration could not be verified after repair.")
     return 1

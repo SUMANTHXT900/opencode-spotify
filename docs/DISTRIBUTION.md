@@ -54,7 +54,7 @@ OpenCode command. This is the supported mutation path — it writes the global
 config while preserving unrelated settings:
 
 ```powershell
-opencode plugin add opencode-spotify@0.6.0-beta.1
+opencode plugin add opencode-spotify@0.6.0-beta.2
 ```
 
 The global config path is resolved from `opencode debug paths config`
@@ -65,7 +65,7 @@ when present. The equivalent JSON is illustrative only:
 
 ```jsonc
 // global opencode.json(c) — illustrative only; prefer `opencode plugin add`
-{ "plugins": ["opencode-spotify@0.6.0-beta.1"] }
+{ "plugins": ["opencode-spotify@0.6.0-beta.2"] }
 ```
 
 - Only one entry is needed in the global `opencode.json(c)`: it loads both
@@ -76,6 +76,16 @@ when present. The equivalent JSON is illustrative only:
   with a registry version on its own.
 - Project-local config is never modified. Setup warns when a project-local
   `opencode-spotify` shadows the global install but leaves it alone.
+- Host limitation (no prefer-local dedupe): if both the global package and a
+  local `./plugin` entry declare the same ID, the OpenCode host activates the
+  first copy in boot order and marks the other `Duplicate plugin ID:
+  opencode-spotify` (failed) without running its `setup()` — so the losing
+  copy never provisions a bridge and there is no port race. The installer
+  cannot prevent or deprioritize this from plugin code (no disable/unregister
+  API; the `-` entry prefix is itself a manual config edit, and project
+  config is never edited). Keep exactly one entry: remove the project-local
+  entry yourself (or `-`-disable it) and restart OpenCode, including any
+  background `serve` process.
 - `cli.json` is only for TUI-only packages: it loads just the TUI half and
   cannot provision the bridge or own the port. Provisioning and updates
   always go through the global registration plus the CLI below.
@@ -112,10 +122,10 @@ explicit approval, and `--dry-run` always shows the plan first.
 Post-publication usage (not yet live):
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.1 setup
-npx opencode-spotify@0.6.0-beta.1 status --json
-npx opencode-spotify@0.6.0-beta.1 update --dry-run
-npx opencode-spotify@0.6.0-beta.1 doctor
+npx opencode-spotify@0.6.0-beta.2 setup
+npx opencode-spotify@0.6.0-beta.2 status --json
+npx opencode-spotify@0.6.0-beta.2 update --dry-run
+npx opencode-spotify@0.6.0-beta.2 doctor
 ```
 
 Until publication, run from the checkout instead: `plugin/` scripts plus
@@ -158,7 +168,7 @@ doctor/status → read-only, safe to run any time (also with --offline)
 ## Update policy
 
 - **Pin the exact plugin version** in the global registration
-  (`opencode-spotify@0.6.0-beta.1`, never a range or `latest` tag). The plugin and
+  (`opencode-spotify@0.6.0-beta.2`, never a range or `latest` tag). The plugin and
   the installed bridge move as a pair: a floating spec can silently pair a new
   plugin with a stale bridge (or vice versa) and produce protocol mismatches.
 - **No silent Spotify changes.** The updater never applies `spicetify apply`,
@@ -220,7 +230,7 @@ spawns this script cross-platform inside `npm test`.
 
 npm requires a `latest` tag on every package and gives the first published
 version `latest` even when `--tag beta` is used. The first release is therefore
-a **prerelease** version (for example `0.6.0-beta.1`) published under `beta`;
+a **prerelease** version (for example `0.6.0-beta.2`) published under `beta`;
 `latest` also points at that prerelease until a stable version is published.
 That is not a stable release, and it is the only way to test through the real
 registry before stable promotion. Do not publish a stable `0.6.0` before the
@@ -229,7 +239,7 @@ physical QA gates pass.
 1. Land the reviewed implementation on `main` or a `release/*` branch with CI
    green, including the packed-package verification.
 2. Set `plugin/package.json` to the prerelease version (for example
-   `0.6.0-beta.1`), commit, and tag/record the exact source revision if desired.
+   `0.6.0-beta.2`), commit, and tag/record the exact source revision if desired.
 3. **First publication is manual and cannot use OIDC**: npm trusted publishing
    can only be configured for a package that already exists. Log in with
    `npm login` + 2FA, run `npm run build:cli`, `npm run verify:package`, then

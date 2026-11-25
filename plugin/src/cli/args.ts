@@ -118,6 +118,6 @@ Examples:
   opencode-spotify status --json
   opencode-spotify doctor
   opencode-spotify update --dry-run
-  npx opencode-spotify@0.6.0-beta.1 setup
+  npx opencode-spotify@0.6.0-beta.2 setup
 `
 }

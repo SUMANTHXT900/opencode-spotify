@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a scoped improvement (no redesigns in this template)
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and scope
+      description: Which requirement (B01–B18) or player area this affects
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Smallest host-supported approach; note alternatives rejected
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: No secrets or private data included
+          required: true
+        - label: Windows-only impact considered
+          required: true

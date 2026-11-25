@@ -82,10 +82,16 @@ export function createPrompter(log: Logger): Prompter {
         const answer = await ask(`${question}\nType ${options.phrase} to continue: `)
         return answer === options.phrase
       }
-      const answer = await ask(`${question} ${options.defaultYes ? "[Y/n]" : "[y/N]"}: `)
-      if (answer === undefined) return false
-      if (!answer) return options.defaultYes === true
-      return /^y(es)?$/i.test(answer)
+      while (true) {
+        const answer = await ask(`${question} ${options.defaultYes ? "[Y/n]" : "[y/N]"}: `)
+        if (answer === undefined) return false
+        if (!answer) return options.defaultYes === true
+        if (/^y(es)?$/i.test(answer)) return true
+        if (/^n(o)?$/i.test(answer)) return false
+        // B07: invalid input explains accepted values and reprompts instead
+        // of silently cancelling. Safe default stays "no".
+        log.out(`Please answer y/yes or n/no (default ${options.defaultYes ? "yes" : "no"}), or leave empty for the default.`)
+      }
     },
     close() {
       if (closed) return

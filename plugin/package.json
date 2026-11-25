@@ -1,6 +1,6 @@
 {
   "name": "opencode-spotify",
-  "version": "0.6.0-beta.1",
+  "version": "0.6.0-beta.2",
   "description": "Spotify playback, synchronized lyrics and album art inside the OpenCode terminal UI",
   "type": "module",
   "license": "MIT",
@@ -20,6 +20,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
+    "test:fast": "node --test tests/artwork.test.ts tests/beta2-regressions.test.ts tests/bridge.test.ts tests/cli-bridge.test.ts tests/cli-core.test.ts tests/cli-main.test.ts tests/cli-opencode.test.ts tests/cli-spicetify.test.ts tests/cli-workflows.test.ts tests/credentials.test.ts tests/extension.test.ts tests/extension-lifecycle.test.ts tests/installer.test.ts tests/layout-render.test.ts tests/lyrics-engine.test.ts tests/lyrics-provider.test.ts tests/lyrics-window.test.ts tests/music.test.ts tests/playback-sync.test.ts tests/playback-ui.test.ts tests/player-layout.test.ts tests/rpc.test.ts tests/security.test.ts tests/slider.test.ts tests/slot-placement.test.ts tests/state.test.ts tests/tui-state.test.ts",
     "test:render": "bun --preload @opentui/solid/preload tests/render-layout.tsx",
     "test:artwork": "bun --preload @opentui/solid/preload tests/render-artwork.tsx",
     "test:vt": "node --test tests/vt-emission.test.ts",
@@ -34,6 +35,17 @@
     "@opentui/core": ">=0.9.0",
     "@opentui/solid": ">=0.9.0",
     "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible problem (no secrets, no private data)
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: e.g. 0.6.0-beta.2 + commit SHA, Windows version, terminal
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact commands run (installer flags, confirmations given)
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs observed
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Paste sanitized output only. Never include bridge.json, secrets, tokens, or private paths.

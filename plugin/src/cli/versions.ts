@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import type { Runtime, VersionInfo } from "./types.ts"
 import { compareVersions, parseVersion } from "./compat.ts"
+import { OPERATION_TIMEOUTS } from "./runtime.ts"
 
 export function packageVersion(metaUrl: string): string {
   const path = fileURLToPath(new URL("../../package.json", metaUrl))
@@ -30,7 +31,7 @@ export async function npmLatest(runtime: Runtime, packageName: string, offline: 
 
 export async function npmTags(runtime: Runtime, packageName: string, offline: boolean): Promise<{ latest?: string | null; beta?: string | null; error?: string }> {
   if (offline) return { latest: null, beta: null, error: "Offline mode: registry not queried" }
-  const result = await runtime.run("npm", ["view", packageName, "dist-tags", "--json"], { timeoutMs: 20_000 })
+  const result = await runtime.run("npm", ["view", packageName, "dist-tags", "--json"], { timeoutMs: OPERATION_TIMEOUTS.registry })
   if (result.code !== 0) {
     const detail = result.stderr.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "npm registry unavailable"
     return { latest: null, beta: null, error: safeError(detail) }

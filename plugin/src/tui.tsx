@@ -138,7 +138,13 @@ export default Plugin.define({
         if (active && version === requestedVersion) adopt(value)
       }).catch(() => {
         if (!active) return
-        if (attempt < 9) retry = setTimeout(() => sync(attempt + 1), 1000)
+        // B10: the bridge may not be ready when the TUI first mounts
+        // (Spotify/bridge startup order, credential provisioning, RPC
+        // readiness). Retry with backoff before surfacing an error; the
+        // server.connected resubscribe below recovers later restarts.
+        // Authenticated loopback security is unchanged: retries are
+        // read-only getState calls, never credential writes.
+        if (attempt < 12) retry = setTimeout(() => sync(attempt + 1), attempt < 6 ? 1000 : 2000)
         else if (version === requestedVersion) setState({ ...initialState(), connection: "error", error: "Spotify service unavailable" })
       })
     }

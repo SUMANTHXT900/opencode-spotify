@@ -9,9 +9,9 @@ app, no separate GUI.
 Not affiliated with Spotify AB or the OpenCode project. Spotify and OpenCode
 are trademarks of their respective owners. The package name is descriptive.
 
-> **V0.6.0-beta.1 · Distribution implementation · Private · Windows**
+> **V0.6.0-beta.2 · Distribution implementation · Private · Windows**
 >
-> The player from V0.5.7 is unchanged. V0.6.0-beta.1 adds the global installer,
+> The player from V0.5.7 is unchanged. V0.6.0-beta.2 adds the global installer,
 > onboarding, update/repair/diagnostics/uninstall commands, npm packaging,
 > and release infrastructure.
 >
@@ -144,9 +144,9 @@ pins its actual Origin; later connections must match exactly.
 
 ---
 
-## Distribution (V0.6.0-beta.1, unpublished)
+## Distribution (V0.6.0-beta.2, unpublished)
 
-V0.6.0-beta.1 keeps the V0.5.7 player and adds the npm distribution path. Status:
+V0.6.0-beta.2 keeps the V0.5.7 player and adds the npm distribution path. Status:
 **private, not published** — build and verify from the checkout.
 
 Windows prerequisites for install/verify/publish are the same table as
@@ -157,13 +157,13 @@ state in [docs/V0.6.0_RELEASE_NOTES.md](docs/V0.6.0_RELEASE_NOTES.md).
 After publication, the global registration is one exact-version entry:
 
 ```jsonc
-{ "plugins": ["opencode-spotify@0.6.0-beta.1"] }
+{ "plugins": ["opencode-spotify@0.6.0-beta.2"] }
 ```
 
 One entry loads both server and TUI; never pair it with a duplicate local
 path entry. Pin the exact version so plugin and bridge stay coordinated.
 The installer performs this through the native
-`opencode plugin add opencode-spotify@0.6.0-beta.1` command rather than editing
+`opencode plugin add opencode-spotify@0.6.0-beta.2` command rather than editing
 JSONC by hand.
 
 CLI (available from the checkout via `npm run build:cli`, and after
@@ -180,9 +180,9 @@ publication via `npx`):
 
 ```powershell
 # Post-publication only — do not run yet:
-npx opencode-spotify@0.6.0-beta.1 setup
-npx opencode-spotify@0.6.0-beta.1 status --json
-npx opencode-spotify@0.6.0-beta.1 update --dry-run
+npx opencode-spotify@0.6.0-beta.2 setup
+npx opencode-spotify@0.6.0-beta.2 status --json
+npx opencode-spotify@0.6.0-beta.2 update --dry-run
 ```
 
 ---

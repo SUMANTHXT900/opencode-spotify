@@ -1,5 +1,5 @@
 import { compareVersions } from "./compat.ts"
-import { inspectOpenCode, addGlobalPlugin, removeGlobalPlugin, updateGlobalPlugin } from "./opencode.ts"
+import { inspectOpenCode, addGlobalPlugin, reconcileRegistration, removeGlobalPlugin, updateGlobalPlugin } from "./opencode.ts"
 import { detectEnvironment } from "./detect.ts"
 import { bridgeOperation, applyBridge } from "./bridge.ts"
 import { upgradeSpicetify } from "./spicetify.ts"
@@ -50,7 +50,7 @@ async function verifySpicetify(ctx: OperationContext): Promise<void> {
  * Update the plugin (optionally with a Spicetify CLI upgrade first) and its
  * owned bridge. Never downgrades. Never replaces a local development plugin.
  */
-export async function runUpdate(ctx: OperationContext, choice: "auto" | "plugin" | "both" = "auto"): Promise<number> {
+export async function runUpdate(ctx: OperationContext, choice: "auto" | "plugin" | "both" | "spicetify" = "auto"): Promise<number> {
   const { ui, detection } = ctx
   if (!detection.windows) {
     ui.error("Updates are supported on Windows only. No changes were made.")
@@ -63,6 +63,10 @@ export async function runUpdate(ctx: OperationContext, choice: "auto" | "plugin"
   const installed = detection.opencode.plugin.version
   const latestStable = ctx.versions.plugin.latest
   const latestBeta = ctx.versions.plugin.latestBeta ?? null
+  if (detection.opencode.plugin.state === "unknown") {
+    ui.error(`Plugin registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`opencode-spotify doctor\`; no changes were made.`)
+    return 1
+  }
   if (!installed) {
     ui.error("The plugin is not registered globally. Run `opencode-spotify setup` first.")
     return 1
@@ -118,6 +122,63 @@ export async function runUpdate(ctx: OperationContext, choice: "auto" | "plugin"
     ui.warn("The bridge still needs repair; continuing with the repair step.")
   }
 
+  if (choice === "spicetify") {
+    if (!spicetifyOutdated) {
+      ui.success(`Spicetify ${spicetifyInstalled ?? "unknown"} is current.`)
+      if (!bridgeNeedsRepair(ctx)) return 0
+      ui.warn("The bridge still needs repair; continuing with the repair step.")
+    } else {
+      if (!spicetifyInstalled) {
+        ui.error("Spicetify is not detected; run `opencode-spotify setup` instead.")
+        return 1
+      }
+      if (!ctx.options.allowSpicetifyUpgrade && !ctx.options.nonInteractive) {
+        const confirmSpicetify = await ctx.prompt.confirm(`Upgrade Spicetify ${spicetifyInstalled} -> ${spicetifyLatest}?`, { defaultYes: false })
+        if (!confirmSpicetify) {
+          ui.warn("Cancelled. Nothing was changed.")
+          return 130
+        }
+        ctx.options.allowSpicetifyUpgrade = true
+      }
+      if (!ctx.options.allowSpicetifyUpgrade) {
+        ui.error("A Spicetify upgrade requires explicit --allow-spicetify-upgrade authorization.")
+        return 1
+      }
+      ui.section("Spicetify upgrade (separate authorization)")
+      const upgrade = await executePlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx)])
+      const upgradeCode = planExitCode(upgrade)
+      if (upgradeCode !== 0) return upgradeCode
+      await verifySpicetify(ctx)
+    }
+    const bridgeWasNeeded = bridgeNeedsRepair(ctx)
+    if (bridgeWasNeeded) {
+      const outcome = await executePlan(ctx, "Synchronize bridge", [{
+        id: "sync-bridge",
+        description: "Synchronize the owned bridge extension after the Spicetify upgrade (credentials reused)",
+        mutates: true,
+        run: async () => {
+          const result = await bridgeOperation(ctx.runtime, ctx.detection.bridge.credentialValid ? "repair" : "install", {
+            spicetifyPath: ctx.detection.spicetify.path,
+            dryRun: false,
+            yes: true,
+          })
+          if (result.code !== 0) throw new Error(result.error ?? "Bridge synchronization failed")
+        },
+      }])
+      if (planExitCode(outcome) !== 0) return 1
+      const next = await detectEnvironment(ctx.runtime)
+      ctx.detection = next
+    }
+    const applied = await maybeApplyBridge(ctx, ctx.detection.spicetify.path, bridgeWasNeeded)
+    if (applied.code !== 0) return applied.code
+    ui.section("Update summary")
+    ui.kv("Plugin", "unchanged")
+    ui.kv("Bridge", applied.applied ? "synchronized and applied" : bridgeWasNeeded ? "synchronized; apply pending" : "already current")
+    ui.kv("Spicetify", ctx.detection.spicetify.version ?? "updated")
+    ui.bullet("Restart running OpenCode processes if the bridge was re-applied.")
+    return 0
+  }
+
   if (combined && spicetifyOutdated) {
     if (!spicetifyInstalled) {
       ui.error("Spicetify is not detected; run `opencode-spotify setup` instead of a combined update.")
@@ -144,9 +205,19 @@ export async function runUpdate(ctx: OperationContext, choice: "auto" | "plugin"
           if (removed.code !== 0) throw new Error(removed.error ?? "opencode plugin remove failed")
           const added = await addGlobalPlugin(ctx.runtime, target, { log: (line) => ctx.ui.line(`  ${line}`) })
           if (added.code !== 0) {
-            // Best-effort rollback to the known-good registration.
-            await addGlobalPlugin(ctx.runtime, oldSpec).catch(() => undefined)
-            throw new Error(added.error ?? "opencode plugin add failed; the previous registration was restored if possible")
+            // A failed/timed-out add may have completed server-side: reconcile
+            // before any rollback so a good new registration is never replaced.
+            const reconciled = await reconcileRegistration(ctx.runtime)
+            if (reconciled.state === "registered") {
+              ctx.ui.warn(`Registration reported failure but is now listed; keeping it and skipping rollback. Detail: ${added.error ?? "unknown error"}`)
+            } else if (reconciled.state === "unknown") {
+              throw new Error(`${added.error ?? "opencode plugin add failed"} (verification also failed: ${reconciled.detail ?? "plugin list did not complete"}; state is unknown, rollback skipped)`)
+            } else {
+              // Verified absent only: best-effort rollback to the known-good spec.
+              const rolledBack = await addGlobalPlugin(ctx.runtime, oldSpec).catch(() => undefined)
+              if (!rolledBack || rolledBack.code !== 0) throw new Error(`${added.error ?? "opencode plugin add failed"} (rollback also failed: ${rolledBack?.error ?? "unknown error"})`)
+              throw new Error(added.error ?? "opencode plugin add failed; the previous registration was restored")
+            }
           }
         } else {
           const updated = await updateGlobalPlugin(ctx.runtime, oldSpec ?? "opencode-spotify")

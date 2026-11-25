@@ -1,7 +1,7 @@
 import { batch, createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show } from "solid-js"
 import { CliRenderEvents, TextAttributes, type BoxRenderable, type ScrollBoxRenderable } from "@opentui/core"
 import type { BridgeCommand } from "../services/protocol"
-import { formatTime, connectionLabel } from "../services/state"
+import { formatTime, connectionLabel, shortConnectionLabel } from "../services/state"
 import { selectLyricMoment } from "../services/lyrics"
 import { lyricWindow, wrapLyricLines, distributeLyricRows, type LyricWindowKind } from "../services/lyrics-window"
 import { describeLyricPhase } from "../ui/lyric-phase"
@@ -389,7 +389,11 @@ export function MiniPlayer(props: MiniPlayerProps) {
           const settingsW = width() >= 9 ? 5 : 0
           const moreW = !layout().nav ? 6 : 0
           const labelW = Math.max(1, width() - settingsW - moreW)
-          const text = `Spotify ${connectionLabel(state())}`; return <CellText renderer={renderer}
+          // B11: narrow sidebars truncate the full sentence; use the concise
+          // variant below ~28 cells so the error state stays readable.
+          const full = `Spotify ${connectionLabel(state())}`
+          const short = `Spotify ${shortConnectionLabel(state())}`
+          const text = labelW < 28 ? short : full; return <CellText renderer={renderer}
           width={labelW} text={text} fg={palette().muted}
           reserve={cellSafety(text)} truncate /> })()}
         <Show when={width() >= 9}>{headerControl(settingsAction)}</Show>

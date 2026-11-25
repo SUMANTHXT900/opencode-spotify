@@ -48,6 +48,30 @@ export function connectionLabel(state: SpotifyState) {
   return "⚠ Connection configuration error"
 }
 
+/**
+ * Concise variant for narrow sidebar layouts (B11). Same meaning as
+ * connectionLabel but fits where the full sentence would truncate.
+ * Recovery guidance lives in dialogs/toasts, not in the header.
+ */
+export function shortConnectionLabel(state: SpotifyState): string {
+  if (state.connection === "connected") return "● Connected"
+  if (state.connection === "connecting") return "○ Connecting"
+  if (state.connection !== "error") return "○ Waiting"
+  if (state.error?.includes("not installed")) return "⚠ No extension"
+  if (state.error?.includes("protocol") || state.error?.includes("update required")) return "⚠ Incompatible"
+  if (state.error?.includes("port unavailable")) return "⚠ Port busy"
+  return "⚠ Config error"
+}
+
+/** Actionable one-line recovery hint for error states (B11). */
+export function connectionHint(state: SpotifyState): string | null {
+  if (state.connection !== "error") return null
+  if (state.error?.includes("not installed")) return "Run opencode-spotify repair, then restart Spotify + OpenCode."
+  if (state.error?.includes("protocol") || state.error?.includes("update required")) return "Update the plugin and repair the bridge."
+  if (state.error?.includes("port unavailable")) return "Another process owns port 18765; it was not terminated."
+  return "Restart Spotify and OpenCode; run doctor if it persists."
+}
+
 export function reconciledPosition(previous: number, retainedLyricsUri: string | null, next: SpotifyState) {
   if (next.track && next.playback.trackUri === next.track.uri) return next.playback.positionMs
   if (next.track && next.track.uri !== retainedLyricsUri || next.connection === "connected" && !next.track) return 0

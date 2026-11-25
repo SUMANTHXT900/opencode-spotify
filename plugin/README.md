@@ -1,11 +1,11 @@
-# opencode-spotify 0.6.0-beta.1 (distribution prerelease, unpublished)
+# opencode-spotify 0.6.0-beta.2 (distribution prerelease, unpublished)
 
 > Private Windows development package for `SUMANTHXT900/opencode-spotify`.
 > **Not published to npm yet.** All `npx` commands below are the
 > post-publication path. Automated verification covers the implementation;
 > physical npm-registry installation QA and release approval are still pending.
 
-V0.6.0-beta.1 keeps the V0.5.7 player and adds the global installer: a compiled
+V0.6.0-beta.2 keeps the V0.5.7 player and adds the global installer: a compiled
 `opencode-spotify` CLI (`setup`, `status`, `update`, `repair`, `doctor`,
 `uninstall`), Windows prerequisite detection, Spicetify lifecycle choices,
 bridge synchronization, a verified tarball check (`npm run verify:package`),
@@ -15,7 +15,7 @@ live in the project repository under `docs/DISTRIBUTION.md` and
 (https://github.com/SUMANTHXT900/opencode-spotify).
 
 After publication, register one exact-version global entry
-(`opencode-spotify@0.6.0-beta.1` in the global `opencode.json(c)` `plugins`); one
+(`opencode-spotify@0.6.0-beta.2` in the global `opencode.json(c)` `plugins`); one
 entry loads server + TUI. The installer uses the native
 `opencode plugin add` command. CLI flags: `--dry-run`, `--yes`, `--json`,
 `--offline`, `--spicetify`, `--apply`, `--allow-spicetify-upgrade`,
@@ -25,9 +25,9 @@ the version.
 
 ```powershell
 # Post-publication only — do not run yet:
-npx opencode-spotify@0.6.0-beta.1 setup
-npx opencode-spotify@0.6.0-beta.1 status --json
-npx opencode-spotify@0.6.0-beta.1 update --dry-run
+npx opencode-spotify@0.6.0-beta.2 setup
+npx opencode-spotify@0.6.0-beta.2 status --json
+npx opencode-spotify@0.6.0-beta.2 update --dry-run
 ```
 
 ---

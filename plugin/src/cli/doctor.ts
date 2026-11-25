@@ -50,6 +50,9 @@ export async function doctorChecks(ctx: OperationContext): Promise<DoctorCheck[]
         ? `A local development plugin is registered (${d.opencode.plugin.source ?? "path unknown"}).`
         : `Global plugin registered${d.opencode.plugin.version ? ` at ${d.opencode.plugin.version}` : ""}.`,
       d.opencode.plugin.local ? "Run `opencode-spotify setup` to register the global package; project config is never edited." : undefined)
+  } else if (d.opencode.plugin.state === "unknown") {
+    add("registration", "warn", "Global plugin inspection failed (timeout or command error); state is unknown, not proven absent.",
+      `Rerun \`opencode-spotify doctor\`. Detail: ${d.opencode.plugin.detail ?? "plugin list did not complete"}.`)
   } else {
     add("registration", "warn", "OpenCode Spotify is not registered globally.",
       "Run `opencode-spotify setup` and approve the global registration.")
