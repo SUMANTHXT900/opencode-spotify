@@ -48,8 +48,11 @@
     }
   },
   "devDependencies": {
+    "@opentui/core": "^0.9.0",
+    "@opentui/solid": "^0.9.0",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.2",
+    "solid-js": "^1.9.19",
     "typescript": "^5.9.0"
   },
   "engines": {
