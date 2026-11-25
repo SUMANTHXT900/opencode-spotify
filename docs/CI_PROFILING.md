@@ -26,14 +26,14 @@ Windows-specific by design.
 
 | Job | Timeout | Steps | Purpose |
 |---|---|---|---|
-| checks-unit | 8 min | ci, typecheck, bridge `--check`, pack dry-run, audit, `test:fast` (25 files) | Static gates + fast unit feedback, no Bun |
+| checks-unit | 8 min | ci, typecheck, bridge `--check`, pack dry-run, audit, `test:fast` (24 files) | Static gates + fast unit feedback, no Bun |
 | render-pack | 12 min | ci, Bun 1.3.14 + Bun cache, render/vt/artwork, `test:bun`, `verify-package` ×1 | Bun-native suites + single release gate |
 
 `test:fast` excludes the packaging fixtures (packaging is verified once in
 render-pack) and the Bun-native suites (`artwork.test.ts`,
-`layout-render.test.ts` shell out to `bun`, which the unit job deliberately
-lacks — proven by run #6). `test:bun` runs exactly those two files in the
-Bun job. `test:vt` runs once; `verify-package` (which builds `dist/` itself)
+`layout-render.test.ts`, `tui-state.test.ts` shell out to `bun`, which the
+unit job deliberately lacks — proven by runs #6 and #8). `test:bun` runs
+exactly those three files in the Bun job. `test:vt` runs once; `verify-package` (which builds `dist/` itself)
 runs once; `pack --dry-run` and `audit` run once in checks-unit (same
 `--audit-level=high` fail policy). Coverage preserved: every gate still runs
 exactly once; per-job `npm ci` is the only duplication, kept cheap by the
