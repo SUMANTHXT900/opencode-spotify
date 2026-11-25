@@ -28,7 +28,7 @@
     "build:cli": "tsc -p tsconfig.cli.json && tsc -p tsconfig.provision.json"
   },
   "dependencies": {
-    "@opencode/plugin": "2.3.0",
+    "@opencode/plugin": "2.3.2",
     "ws": "^8.23.0"
   },
   "peerDependencies": {
