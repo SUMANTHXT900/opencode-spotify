@@ -161,6 +161,7 @@ jobs:
         if: always()
         env:
           CAND: ${{ runner.temp }}/candidates.json
+        working-directory: plugin
         run: |
           $ErrorActionPreference = 'Stop'
           "## compat ${{ matrix.lane }}: ${{ job.status }}" >> $env:GITHUB_STEP_SUMMARY
