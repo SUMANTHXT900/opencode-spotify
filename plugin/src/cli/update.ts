@@ -1,11 +1,207 @@
+// Update workflow (B09).
+//
+// Update is deliberately channel-aware and ownership-aware:
+//   * installed vs target versions come from update-plan.ts (single source of
+//     truth); an older registry tag is never advertised as an update and no
+//     workflow ever downgrades or moves a stable install onto beta;
+//   * the Spicetify route is chosen from the detected owner and the achievable
+//     target for that owner; a target is only considered when the published
+//     version is a strict stable release;
+//   * a manager-owned Spicetify (winget/scoop/choco) is updated through that
+//     owner's manager only, never by installing a second copy;
+//   * an unknown owner is refused for an explicitly requested Spicetify update,
+//     and skipped (with a warning) when the plugin update can still proceed.
+//
+// The owned bridge is synchronized to the selected plugin version while
+// reusing valid credentials, and the known broken beta.2 bridge is repaired
+// even when it happens to inspect as current.
+//
+// Cancellation is cooperative: every mutation receives ctx.cancel, protected
+// steps finish once started, and a cancelled run returns 130 (never 1).
 import { compareVersions } from "./compat.ts"
 import { inspectOpenCode, addGlobalPlugin, reconcileRegistration, removeGlobalPlugin, updateGlobalPlugin } from "./opencode.ts"
 import { detectEnvironment } from "./detect.ts"
-import { bridgeOperation, applyBridge } from "./bridge.ts"
-import { upgradeSpicetify } from "./spicetify.ts"
-import { executePlan, maybeApplyBridge, planExitCode, registrationSpec, specVersion } from "./plan.ts"
-import { selectPluginTarget } from "./update-plan.ts"
-import type { OperationContext, PlanStep } from "./types.ts"
+import { bridgeOperation } from "./bridge.ts"
+import { upgradeSpicetify } from "./spicetify-official.ts"
+import type { OfficialInstallerApproval, OfficialUpgradeOptions } from "./spicetify-official.ts"
+import { OperationCancelled } from "./cancel.ts"
+import {
+  announcePlan,
+  cancelAwareRuntime,
+  maybeApplyBridge,
+  planExitCode,
+  planReporter,
+  planSkipOutcome,
+  registrationSpec,
+  runPlanSteps,
+  specVersion,
+} from "./plan.ts"
+import { describePluginUpdate, isBrokenBeta2, type UpdateAvailability } from "./update-plan.ts"
+import {
+  confirmUpdatePlan,
+  createUpdateSummary,
+  createUpdateViewModel,
+  promptUpdateSelection,
+  renderSpicetifyGuidance,
+  renderUpdatePlan,
+  renderUpdateScreen,
+  renderUpdateSummary,
+  spicetifyUpdateGuidance,
+  toUpdatePlan,
+  type UpdateViewModel,
+} from "./ui/update-view.ts"
+import { PLAN_MESSAGES, sanitizeMessage } from "./state.ts"
+import type { InstallOwner, OperationContext, PlanStep, SpicetifyInfo } from "./types.ts"
+
+/**
+ * Forward a progress line to the structured reporter when one is attached,
+ * keeping the legacy two-space Ui line otherwise (B06 contract). No percentage
+ * is ever fabricated; progress stays indeterminate.
+ */
+function reportProgressLine(ctx: OperationContext, scope: string, line: string): void {
+  const reporter = ctx.report
+  if (reporter && typeof reporter.progress === "function") {
+    try {
+      reporter.progress(scope, line)
+      return
+    } catch {
+      // A broken reporter must never abort the operation; use the Ui fallback.
+    }
+  }
+  ctx.ui.line(`  ${line}`)
+}
+
+export type UpdateChoice = "auto" | "plugin" | "both" | "spicetify"
+
+/** Owner-derived Spicetify update route. "official" is the script installer. */
+export type SpicetifyUpdateMethod = "official" | "winget" | "scoop" | "choco" | "unsupported"
+
+export function spicetifyUpdateMethod(owner: InstallOwner): SpicetifyUpdateMethod {
+  switch (owner) {
+    case "script": return "official"
+    case "winget": return "winget"
+    case "scoop": return "scoop"
+    case "choco": return "choco"
+    default: return "unsupported"
+  }
+}
+
+const STRICT_STABLE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+
+/**
+ * Strictly stable version (no prerelease/build suffix, no leading zeros) or
+ * null. A published prerelease is never an achievable update target.
+ */
+export function stableSpicetifyVersion(value: string | null | undefined): string | null {
+  const candidate = (value ?? "").trim().replace(/^v/i, "")
+  return STRICT_STABLE.test(candidate) ? candidate : null
+}
+
+/**
+ * The version an owner-safe upgrade can actually install. Only a strict stable
+ * published version may be advertised; anything else yields no target rather
+ * than an invented one.
+ */
+export function spicetifyUpdateTarget(method: SpicetifyUpdateMethod, latest: string | null): string | null {
+  if (method === "unsupported") return null
+  return stableSpicetifyVersion(latest)
+}
+
+export function spicetifyUpdateDescription(owner: InstallOwner): string {
+  switch (spicetifyUpdateMethod(owner)) {
+    case "official":
+      return "Upgrade Spicetify through its official installer/update pipeline (script-owned install; no second copy)"
+    case "winget":
+      return "Upgrade Spicetify through Winget (Spicetify.Spicetify owner package; no second copy)"
+    case "scoop":
+      return "Upgrade Spicetify through Scoop (owner package; no second copy)"
+    case "choco":
+      return "Upgrade Spicetify through Chocolatey (owner package; no second copy)"
+    default:
+      return "Spicetify owner is unknown; owner-safe update is not possible"
+  }
+}
+
+export type SpicetifyGateStatus =
+  | "outdated"
+  | "current"
+  | "unknown"
+  | "downgrade"
+  | "not-installed"
+  | "unsupported-owner"
+
+export interface SpicetifyUpdateGate {
+  status: SpicetifyGateStatus
+  /** The owner-safe target that could be installed, when one exists. */
+  achievable: string | null
+  /** Set only when an update should run. */
+  target: string | null
+  installed: string | null
+  owner: InstallOwner
+  method: SpicetifyUpdateMethod
+  /** Human wording for a state that must not be described as "current". */
+  message?: string
+}
+
+/**
+ * Gate a Spicetify update from the achievable target and the detected owner.
+ * A missing or prerelease published version never turns into "current".
+ */
+export function spicetifyUpdateGate(input: {
+  installed: string | null
+  owner: InstallOwner
+  latest: string | null | undefined
+}): SpicetifyUpdateGate {
+  const method = spicetifyUpdateMethod(input.owner)
+  const achievable = spicetifyUpdateTarget(method, input.latest ?? null)
+  const base = {
+    installed: input.installed,
+    owner: input.owner,
+    method,
+    achievable,
+    target: null as string | null,
+  }
+  if (!input.installed) {
+    return { ...base, status: "not-installed", message: "Spicetify is not detected; run `opencode-spotify setup` instead." }
+  }
+  if (method === "unsupported") {
+    return {
+      ...base,
+      status: "unsupported-owner",
+      message: "The Spicetify installation owner is unknown. Refusing to update it: an owner-safe update cannot be selected and a second copy would be unsafe.",
+    }
+  }
+  if (!achievable) {
+    const published = (input.latest ?? "").trim()
+    return {
+      ...base,
+      status: "unknown",
+      message: published
+        ? `The published Spicetify version ${sanitizeMessage(published)} is not a strict stable release, so no owner-safe update target is available.`
+        : "The latest Spicetify version could not be determined, so no owner-safe update target is available.",
+    }
+  }
+  const compared = compareVersions(achievable, input.installed)
+  if (compared === 1) return { ...base, status: "outdated", target: achievable }
+  if (compared === 0) return { ...base, status: "current", message: `Spicetify ${input.installed} is current.` }
+  if (compared === -1) {
+    return {
+      ...base,
+      status: "downgrade",
+      message: `The available Spicetify ${achievable} is older than installed ${input.installed}; downgrades are never automatic.`,
+    }
+  }
+  return { ...base, status: "unknown", message: "Spicetify versions could not be compared, so no owner-safe update will run." }
+}
+
+function gateAvailability(status: SpicetifyGateStatus): UpdateAvailability["spicetify"] {
+  switch (status) {
+    case "outdated": return "outdated"
+    case "current": return "current"
+    case "downgrade": return "downgrade"
+    default: return "unknown"
+  }
+}
 
 function pluginSpec(ctx: OperationContext): string | null {
   if (ctx.options.packageSpec) return ctx.options.packageSpec
@@ -13,7 +209,8 @@ function pluginSpec(ctx: OperationContext): string | null {
 }
 
 function bridgeNeedsRepair(ctx: OperationContext): boolean {
-  return !ctx.detection.bridge.installed || ctx.detection.bridge.registration !== "current"
+  return !ctx.detection.bridge.installed || ctx.detection.bridge.registration !== "current" ||
+    (ctx.detection.bridge.configExists && !ctx.detection.bridge.credentialValid)
 }
 
 async function verifyVersion(ctx: OperationContext, expected: string): Promise<boolean> {
@@ -24,18 +221,54 @@ async function verifyVersion(ctx: OperationContext, expected: string): Promise<b
   return compared !== null && compared !== -1
 }
 
+/**
+ * One Spicetify update step. The route is chosen from the detected owner:
+ * official pipeline for script installs, the owner's manager otherwise.
+ * Unknown owners never reach this step (refused or skipped while planning).
+ *
+ * The plan screen already obtained consent, so the approval callback only
+ * displays the exact route details; it never asks a second time.
+ */
 async function spicetifyUpdateStep(ctx: OperationContext): Promise<PlanStep> {
   return {
     id: "upgrade-spicetify",
-    description: `Upgrade Spicetify using its ${ctx.detection.spicetify.owner} installation method`,
+    description: spicetifyUpdateDescription(ctx.detection.spicetify.owner),
     mutates: true,
+    // A started upgrade finishes and verifies before cancellation is honoured.
+    interrupt: "protected",
     run: async () => {
-      const result = await upgradeSpicetify(ctx.runtime, ctx.detection.spicetify, {
+      const options: OfficialUpgradeOptions = {
         dryRun: false,
-        log: { out: (line) => ctx.ui.line(`  ${line}`), err: (line) => ctx.log.err(line) },
-        approve: async () => true,
-      })
-      if (result.code !== 0) throw new Error(result.error ?? "Spicetify upgrade failed")
+        offline: ctx.options.offline,
+        nonInteractive: ctx.options.nonInteractive,
+        interactive: !ctx.options.nonInteractive,
+        cancel: ctx.cancel,
+        log: { out: (line: string) => reportProgressLine(ctx, "spicetify", line), err: (line: string) => ctx.log.err(line) },
+        onProgress: (line: string) => reportProgressLine(ctx, "spicetify", line),
+        beforeInteractive: async () => { await ctx.ui.suspend?.() },
+        afterInteractive: async () => { await ctx.ui.resume?.() },
+        approve: async (details: OfficialInstallerApproval) => {
+          ctx.ui.section("Spicetify upgrade plan")
+          ctx.ui.kv("Method", details.method)
+          ctx.ui.kv("Source", details.source)
+          if (details.command) ctx.ui.kv("Command", details.command)
+          if (details.scriptUrl) ctx.ui.kv("Script", details.scriptUrl)
+          if (details.scriptSha256) ctx.ui.kv("SHA-256", details.scriptSha256)
+          for (const warning of details.warnings ?? []) ctx.ui.warn(warning)
+          // Single consent: the plan screen already obtained it. Displaying the
+          // route details is not another question.
+          return true
+        },
+      }
+      const result = await upgradeSpicetify(
+        cancelAwareRuntime(ctx.runtime, ctx.cancel),
+        ctx.detection.spicetify,
+        options,
+      )
+      if (result.cancelled) throw new OperationCancelled("upgrade-spicetify", "Spicetify upgrade cancelled")
+      if (result.code !== 0 || result.timedOut) {
+        throw new Error(result.error ?? (result.timedOut ? "Spicetify upgrade timed out; state is uncertain" : "Spicetify upgrade failed"))
+      }
     },
   }
 }
@@ -46,12 +279,117 @@ async function verifySpicetify(ctx: OperationContext): Promise<void> {
   if (!next.spicetify.available) throw new Error("Spicetify is no longer detected after the upgrade")
 }
 
+function updateModel(
+  ctx: OperationContext,
+  pluginInfo: ReturnType<typeof describePluginUpdate>,
+  spicetifyStatus: ReturnType<typeof gateAvailability>,
+  spicetifyTarget: string | null,
+): UpdateViewModel {
+  return createUpdateViewModel({
+    detection: ctx.detection,
+    versions: {
+      ...ctx.versions,
+      // The screen must report the achievable owner-safe target, not a newer
+      // registry tag that no owner-safe route can install.
+      spicetify: { ...ctx.versions.spicetify, latest: spicetifyTarget },
+    },
+    pluginUpdate: pluginInfo,
+    spicetifyStatus,
+    // The verified-release marker/routing was retired with the official
+    // installer pipeline (B05); never present a verified-zip path here.
+    verifiedSpicetifyInstall: false,
+  })
+}
+
 /**
- * Update the plugin (optionally with a Spicetify CLI upgrade first) and its
- * owned bridge. Never downgrades. Never replaces a local development plugin.
+ * Show the owner-specific guidance. The C17 official-installer line still
+ * mentions `spicetify upgrade`; B05 retired that self-updater, so the official
+ * branch is rendered with the owner-safe pipeline description instead.
  */
-export async function runUpdate(ctx: OperationContext, choice: "auto" | "plugin" | "both" | "spicetify" = "auto"): Promise<number> {
+function renderOwnerGuidance(ctx: OperationContext): void {
+  const owner = ctx.detection.spicetify.owner
+  const guidance = spicetifyUpdateGuidance(owner, { verifiedInstall: false })
+  if (guidance.category === "official") {
+    renderSpicetifyGuidance(ctx.ui, {
+      ...guidance,
+      method: spicetifyUpdateDescription(owner),
+      command: null,
+      lines: [
+        "This installation is owned by the official Spicetify installer.",
+        "Update it through the official installer pipeline only; do not also run winget, Scoop or Chocolatey against it.",
+        ...guidance.lines.filter((line) => line.startsWith("Docs:")),
+      ],
+      warning: undefined,
+    })
+    return
+  }
+  renderSpicetifyGuidance(ctx.ui, guidance)
+}
+
+/**
+ * Render the plan once, collect a single consent, then execute through the
+ * shared runner. With a structured reporter the plan is delivered as a `plan`
+ * event carrying the real step descriptions; without one the C17 screen renders
+ * it exactly once (no duplicate plan output).
+ *
+ * Cancel/dry-run/confirmation wording is taken from the shared PLAN_MESSAGES
+ * (via plan.ts) so update.ts and plan.ts cannot drift.
+ */
+async function presentAndRunPlan(ctx: OperationContext, title: string, steps: PlanStep[]): Promise<number> {
+  if (ctx.cancel.requested) {
+    ctx.cancel.settle("cancelled")
+    ctx.ui.warn(PLAN_MESSAGES.cancelled)
+    return 130
+  }
+  const plan = toUpdatePlan(title, steps)
+  if (!planReporter(ctx)) renderUpdatePlan(ctx.ui, plan)
+  announcePlan(ctx, title, steps, { render: false })
+  if (!steps.length) {
+    ctx.ui.status("info", PLAN_MESSAGES.nothingToDo)
+    return 0
+  }
+  const consent = await confirmUpdatePlan(ctx.prompt, plan, {
+    yes: ctx.options.yes,
+    nonInteractive: ctx.options.nonInteractive,
+    dryRun: ctx.options.dryRun,
+  })
+  if (consent === "dry-run") return planExitCode(planSkipOutcome(ctx, steps, "dry-run"))
+  if (consent === "confirmation-required") return planExitCode(planSkipOutcome(ctx, steps, "confirmation-required"))
+  if (consent === "declined") return planExitCode(planSkipOutcome(ctx, steps, "cancelled"))
+  return planExitCode(await runPlanSteps(steps, ctx, { announce: false }))
+}
+
+function bridgeSyncStep(ctx: OperationContext, reason: string): PlanStep {
+  const reuseCredentials = ctx.detection.bridge.credentialValid
+  return {
+    id: "sync-bridge",
+    description: `${reason} (${reuseCredentials ? "credentials reused" : "missing/invalid credentials regenerated"})`,
+    mutates: true,
+    interrupt: "protected",
+    run: async () => {
+      const result = await bridgeOperation(cancelAwareRuntime(ctx.runtime, ctx.cancel), reuseCredentials ? "repair" : "install", {
+        spicetifyPath: ctx.detection.spicetify.path,
+        dryRun: false,
+        yes: true,
+      })
+      if (result.cancelled) throw new OperationCancelled("sync-bridge", "Bridge synchronization cancelled")
+      if (result.code !== 0) throw new Error(result.error ?? "Bridge synchronization failed")
+    },
+  }
+}
+
+/**
+ * Update the plugin (optionally with an owner-safe Spicetify CLI upgrade first)
+ * and its owned bridge. Never downgrades, never replaces a local development
+ * plugin, and never lets an update switch channels.
+ */
+export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "auto"): Promise<number> {
   const { ui, detection } = ctx
+  if (ctx.cancel.requested) {
+    ctx.cancel.settle("cancelled")
+    ui.warn(PLAN_MESSAGES.cancelled)
+    return 130
+  }
   if (!detection.windows) {
     ui.error("Updates are supported on Windows only. No changes were made.")
     return 1
@@ -71,215 +409,313 @@ export async function runUpdate(ctx: OperationContext, choice: "auto" | "plugin"
     ui.error("The plugin is not registered globally. Run `opencode-spotify setup` first.")
     return 1
   }
-  const latest = selectPluginTarget(installed, latestStable, latestBeta)
+
+  // Channel-aware comparison via the single source of truth. Never advertises
+  // an older registry tag as an update; never downgrades; never labels a
+  // prerelease stable. Stable stays on stable; beta sees newer beta or stable.
+  const pluginInfo = describePluginUpdate(installed, latestStable, latestBeta)
+  const latest = pluginInfo.target
   if (!latest) {
-    if (!latestStable && !latestBeta) {
+    if (pluginInfo.status === "unknown" || (!latestStable && !latestBeta)) {
       ui.error(`No published version could be determined${ctx.versions.plugin.error ? `: ${ctx.versions.plugin.error}` : "."}`)
       ui.warn("Use `--offline` only for diagnostics. Retry when the npm registry is reachable.")
       return 1
     }
-    if (installed && latestStable && compareVersions(latestStable, installed) === -1 &&
-      (!latestBeta || compareVersions(latestBeta, installed) !== 1)) {
-      ui.error(`The registry reports ${latestStable}, which is older than installed ${installed}. Downgrades are never automatic.`)
+    if (pluginInfo.status === "registry-older") {
+      const older = [latestStable, latestBeta].filter((value): value is string => !!value).join(", ")
+      ui.error(`The registry reports ${older}, which is older than installed ${installed}. Downgrades are never automatic.`)
       return 1
     }
-    if (installed && latestBeta && compareVersions(latestBeta, installed) === -1 &&
-      (!latestStable || compareVersions(latestStable, installed) !== 1)) {
-      ui.error(`The registry reports ${latestBeta}, which is older than installed ${installed}. Downgrades are never automatic.`)
-      return 1
-    }
-    ui.success(`OpenCode Spotify ${installed} is current.`)
-    if (!bridgeNeedsRepair(ctx)) return 0
-    ui.warn("The bridge still needs repair; continuing with the repair step.")
   }
+
   const pluginOutdated = latest !== null
   const spicetifyInstalled = detection.spicetify.version
-  const spicetifyLatest = ctx.versions.spicetify.latest
-  const spicetifyOutdated = compareVersions(spicetifyLatest, spicetifyInstalled) === 1
-  let combined = choice === "both" || (choice === "auto" && ctx.options.allowSpicetifyUpgrade && pluginOutdated && spicetifyOutdated)
-  if (choice === "auto" && pluginOutdated && spicetifyOutdated && !ctx.options.nonInteractive && !combined) {
-    const selected = await ctx.prompt.choose("Updates are available for OpenCode Spotify and Spicetify.", [
-      { label: `Update OpenCode Spotify only (${installed} -> ${latest})`, value: "plugin" },
-      { label: `Update OpenCode Spotify and Spicetify (${spicetifyInstalled} -> ${spicetifyLatest})`, value: "both" },
-      { label: "Cancel without changing anything", value: "cancel" },
-    ])
-    if (!selected || selected === "cancel") {
-      ui.warn("Cancelled. Nothing was changed.")
-      return 130
-    }
-    if (selected === "both") {
-      ctx.options.allowSpicetifyUpgrade = true
-      combined = true
-    }
-  }
-  if (combined && !ctx.options.allowSpicetifyUpgrade) {
+  // Achievable target + owner. A non-stable/unavailable published version is
+  // never treated as an update, and never reported as "current".
+  const spicetifyGate = spicetifyUpdateGate({
+    installed: spicetifyInstalled,
+    owner: detection.spicetify.owner,
+    latest: ctx.versions.spicetify.latest,
+  })
+  const spicetifyStatus = gateAvailability(spicetifyGate.status)
+  const spicetifyOutdated = spicetifyGate.status === "outdated"
+  const brokenBeta2 = isBrokenBeta2(installed)
+
+  // An explicitly requested combined update always requires pre-authorization;
+  // never ask for it after the Spicetify plan was already shown.
+  if (choice === "both" && !ctx.options.allowSpicetifyUpgrade) {
     ui.error("A combined update requires explicit --allow-spicetify-upgrade authorization.")
     return 1
   }
-  if (!pluginOutdated && !(combined && spicetifyOutdated)) {
-    ui.success(`OpenCode Spotify ${installed} is current${spicetifyOutdated ? `; Spicetify ${spicetifyLatest} is available (plugin-only update requested)` : ""}.`)
-    if (!bridgeNeedsRepair(ctx)) return 0
-    ui.warn("The bridge still needs repair; continuing with the repair step.")
+
+  // C17 update screen: installed versions and backend channel verdicts only.
+  const model = updateModel(ctx, pluginInfo, spicetifyStatus, spicetifyGate.achievable)
+  renderUpdateScreen(ui, model, {
+    allowSpicetifyUpgrade: ctx.options.allowSpicetifyUpgrade,
+    offline: ctx.options.offline,
+  })
+  if (spicetifyOutdated) renderOwnerGuidance(ctx)
+
+  // ---- explicit selection or conservative auto-selection -------------------
+  let pluginSelected = choice === "both" || choice === "plugin"
+  let spicetifySelected = choice === "both" || choice === "spicetify"
+  if (choice === "auto") {
+    const canPrompt = !ctx.options.nonInteractive && !ctx.options.dryRun
+    if (pluginOutdated && spicetifyOutdated) {
+      if (canPrompt) {
+        const selected = await promptUpdateSelection(ui, ctx.prompt, model, {
+          allowSpicetifyUpgrade: ctx.options.allowSpicetifyUpgrade,
+        })
+        if (selected === "cancel") {
+          ui.warn("Cancelled. Nothing was changed.")
+          return 130
+        }
+        pluginSelected = selected === "both" || selected === "plugin"
+        spicetifySelected = selected === "both" || selected === "spicetify"
+        // Choosing a combined/Spicetify update in the screen IS the explicit
+        // interactive authorization; persist it for the plan and mutations.
+        if (spicetifySelected) ctx.options.allowSpicetifyUpgrade = true
+      } else {
+        // Noninteractive/dry-run: --allow-spicetify-upgrade is the explicit
+        // combined authorization. Without it only the plugin moves.
+        pluginSelected = true
+        spicetifySelected = ctx.options.allowSpicetifyUpgrade
+      }
+    } else if (spicetifyOutdated && !pluginOutdated) {
+      // A Spicetify-only update still needs an explicit decision; never
+      // upgrade a manager/CLI silently because the plugin happens to be current.
+      if (!canPrompt) {
+        pluginSelected = false
+        spicetifySelected = ctx.options.allowSpicetifyUpgrade
+      } else {
+        const selected = await promptUpdateSelection(ui, ctx.prompt, model, {
+          allowSpicetifyUpgrade: ctx.options.allowSpicetifyUpgrade,
+        })
+        if (selected === "cancel") {
+          ui.warn("Cancelled. Nothing was changed.")
+          return 130
+        }
+        pluginSelected = false
+        spicetifySelected = selected === "spicetify" || selected === "both"
+        if (spicetifySelected) ctx.options.allowSpicetifyUpgrade = true
+      }
+    } else {
+      pluginSelected = pluginOutdated
+      spicetifySelected = false
+    }
   }
 
-  if (choice === "spicetify") {
-    if (!spicetifyOutdated) {
+  if (ctx.cancel.requested) {
+    ctx.cancel.settle("cancelled")
+    ui.warn(PLAN_MESSAGES.cancelled)
+    return 130
+  }
+
+  // ---- Spicetify eligibility ----------------------------------------------
+  const spicetifyOnly = spicetifySelected && !pluginSelected
+  if (spicetifySelected && !spicetifyOutdated) {
+    if (spicetifyGate.status === "current") {
+      // Only a real comparison may claim "current".
       ui.success(`Spicetify ${spicetifyInstalled ?? "unknown"} is current.`)
-      if (!bridgeNeedsRepair(ctx)) return 0
-      ui.warn("The bridge still needs repair; continuing with the repair step.")
+    } else if (spicetifyOnly) {
+      // An explicitly requested Spicetify-only update cannot be honoured.
+      ui.error(spicetifyGate.message ?? "A Spicetify update cannot be planned safely.")
+      return 1
     } else {
-      if (!spicetifyInstalled) {
-        ui.error("Spicetify is not detected; run `opencode-spotify setup` instead.")
+      // A combined update must still update the plugin: skip Spicetify only.
+      ui.warn(`Skipping the Spicetify update. ${spicetifyGate.message ?? "No owner-safe update target is available."}`)
+    }
+    spicetifySelected = false
+  }
+
+  if (spicetifySelected) {
+    if (!spicetifyInstalled) {
+      ui.error("Spicetify is not detected; run `opencode-spotify setup` instead.")
+      return 1
+    }
+    if (spicetifyGate.method === "unsupported") {
+      ui.error("The Spicetify installation owner is unknown. Refusing to update it: an owner-safe update cannot be selected and a second copy would be unsafe.")
+      ui.bullet("Reinstall Spicetify once with a supported owner (Winget, Scoop, Chocolatey, or the official installer), then retry.")
+      return 1
+    }
+    if (!ctx.options.allowSpicetifyUpgrade) {
+      if (ctx.options.nonInteractive) {
+        ui.error("A Spicetify update requires explicit --allow-spicetify-upgrade authorization.")
         return 1
       }
-      if (!ctx.options.allowSpicetifyUpgrade && !ctx.options.nonInteractive) {
-        const confirmSpicetify = await ctx.prompt.confirm(`Upgrade Spicetify ${spicetifyInstalled} -> ${spicetifyLatest}?`, { defaultYes: false })
+      if (ctx.options.dryRun) {
+        // Dry-run never prompts: show that it would need authorization.
+        ui.line("  Spicetify upgrades need a separate confirmation (or --allow-spicetify-upgrade).")
+        spicetifySelected = false
+      } else {
+        const confirmSpicetify = await ctx.prompt.confirm(
+          `Spicetify is owned by ${detection.spicetify.owner}. Update it with ${spicetifyGate.method === "official" ? "the official pipeline" : `the ${spicetifyGate.method} manager`} (${spicetifyInstalled} -> ${spicetifyGate.target})?`,
+          { defaultYes: false },
+        )
         if (!confirmSpicetify) {
           ui.warn("Cancelled. Nothing was changed.")
           return 130
         }
         ctx.options.allowSpicetifyUpgrade = true
       }
-      if (!ctx.options.allowSpicetifyUpgrade) {
-        ui.error("A Spicetify upgrade requires explicit --allow-spicetify-upgrade authorization.")
-        return 1
-      }
-      ui.section("Spicetify upgrade (separate authorization)")
-      const upgrade = await executePlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx)])
-      const upgradeCode = planExitCode(upgrade)
-      if (upgradeCode !== 0) return upgradeCode
-      await verifySpicetify(ctx)
     }
+  }
+
+  if (pluginSelected && !pluginOutdated) pluginSelected = false
+
+  // A combined plan must have explicit authorization even if auto-selected.
+  if (pluginSelected && spicetifySelected && !ctx.options.allowSpicetifyUpgrade) {
+    ui.error("A combined update requires explicit --allow-spicetify-upgrade authorization.")
+    return 1
+  }
+
+  // ---- spicetify-only path -------------------------------------------------
+  if (spicetifySelected && !pluginSelected) {
+    ui.section("Spicetify update (separate authorization)")
+    const upgradeCode = await presentAndRunPlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx)])
+    if (upgradeCode !== 0) return upgradeCode
+    if (ctx.options.dryRun) return 0
+    await verifySpicetify(ctx)
+
     const bridgeWasNeeded = bridgeNeedsRepair(ctx)
     if (bridgeWasNeeded) {
-      const outcome = await executePlan(ctx, "Synchronize bridge", [{
-        id: "sync-bridge",
-        description: "Synchronize the owned bridge extension after the Spicetify upgrade (credentials reused)",
-        mutates: true,
-        run: async () => {
-          const result = await bridgeOperation(ctx.runtime, ctx.detection.bridge.credentialValid ? "repair" : "install", {
-            spicetifyPath: ctx.detection.spicetify.path,
-            dryRun: false,
-            yes: true,
-          })
-          if (result.code !== 0) throw new Error(result.error ?? "Bridge synchronization failed")
-        },
-      }])
-      if (planExitCode(outcome) !== 0) return 1
+      const bridgeCode = await presentAndRunPlan(ctx, "Synchronize bridge", [bridgeSyncStep(ctx, "Synchronize the owned bridge extension after the Spicetify update")])
+      if (bridgeCode !== 0) return bridgeCode
       const next = await detectEnvironment(ctx.runtime)
       ctx.detection = next
     }
     const applied = await maybeApplyBridge(ctx, ctx.detection.spicetify.path, bridgeWasNeeded)
     if (applied.code !== 0) return applied.code
-    ui.section("Update summary")
-    ui.kv("Plugin", "unchanged")
-    ui.kv("Bridge", applied.applied ? "synchronized and applied" : bridgeWasNeeded ? "synchronized; apply pending" : "already current")
-    ui.kv("Spicetify", ctx.detection.spicetify.version ?? "updated")
-    ui.bullet("Restart running OpenCode processes if the bridge was re-applied.")
+    renderUpdateSummary(ui, createUpdateSummary({
+      plugin: { installed: ctx.detection.opencode.plugin.version ?? installed, target: null, changed: false },
+      spicetify: {
+        version: ctx.detection.spicetify.version ?? spicetifyInstalled,
+        changed: true,
+        owner: ctx.detection.spicetify.owner,
+      },
+      bridge: {
+        synchronized: bridgeWasNeeded,
+        applied: applied.applied,
+        pending: bridgeWasNeeded && !applied.applied,
+      },
+      nextSteps: ["Restart running OpenCode processes if the bridge was re-applied.", "Playback is not verified by this command."],
+    }))
     return 0
   }
 
-  if (combined && spicetifyOutdated) {
-    if (!spicetifyInstalled) {
-      ui.error("Spicetify is not detected; run `opencode-spotify setup` instead of a combined update.")
-      return 1
-    }
-    ui.section("Spicetify upgrade (separate authorization)")
-    const upgrade = await executePlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx)])
-    const code = planExitCode(upgrade)
+  // ---- combined Spicetify upgrade first ------------------------------------
+  if (spicetifySelected) {
+    ui.section("Spicetify update (separate authorization)")
+    const code = await presentAndRunPlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx)])
     if (code !== 0) return code
+    if (ctx.options.dryRun) return 0
     await verifySpicetify(ctx)
   }
 
+  // ---- plugin + bridge plan ------------------------------------------------
   const steps: PlanStep[] = []
-  if (pluginOutdated) {
+  if (pluginSelected) {
     const oldSpec = pluginSpec(ctx)
     const target = registrationSpec(ctx, latest)
     steps.push({
       id: "update-global-registration",
       description: `Replace the global registration ${oldSpec ?? installed} with ${target}`,
       mutates: true,
+      interrupt: "protected",
       run: async () => {
+        const runtime = cancelAwareRuntime(ctx.runtime, ctx.cancel)
         if (oldSpec && specVersion(oldSpec)) {
-          const removed = await removeGlobalPlugin(ctx.runtime, oldSpec)
+          const removed = await removeGlobalPlugin(runtime, oldSpec)
+          if (removed.cancelled) throw new OperationCancelled("update-global-registration", "Registration update cancelled")
           if (removed.code !== 0) throw new Error(removed.error ?? "opencode plugin remove failed")
-          const added = await addGlobalPlugin(ctx.runtime, target, { log: (line) => ctx.ui.line(`  ${line}`) })
+          const added = await addGlobalPlugin(runtime, target, { log: (line) => ctx.ui.line(`  ${line}`) })
           if (added.code !== 0) {
             // A failed/timed-out add may have completed server-side: reconcile
             // before any rollback so a good new registration is never replaced.
-            const reconciled = await reconcileRegistration(ctx.runtime)
+            const reconciled = await reconcileRegistration(runtime)
             if (reconciled.state === "registered") {
               ctx.ui.warn(`Registration reported failure but is now listed; keeping it and skipping rollback. Detail: ${added.error ?? "unknown error"}`)
             } else if (reconciled.state === "unknown") {
               throw new Error(`${added.error ?? "opencode plugin add failed"} (verification also failed: ${reconciled.detail ?? "plugin list did not complete"}; state is unknown, rollback skipped)`)
             } else {
               // Verified absent only: best-effort rollback to the known-good spec.
-              const rolledBack = await addGlobalPlugin(ctx.runtime, oldSpec).catch(() => undefined)
+              const rolledBack = await addGlobalPlugin(runtime, oldSpec).catch(() => undefined)
               if (!rolledBack || rolledBack.code !== 0) throw new Error(`${added.error ?? "opencode plugin add failed"} (rollback also failed: ${rolledBack?.error ?? "unknown error"})`)
               throw new Error(added.error ?? "opencode plugin add failed; the previous registration was restored")
             }
           }
         } else {
-          const updated = await updateGlobalPlugin(ctx.runtime, oldSpec ?? "opencode-spotify")
+          const updated = await updateGlobalPlugin(runtime, oldSpec ?? "opencode-spotify")
+          if (updated.cancelled) throw new OperationCancelled("update-global-registration", "Registration update cancelled")
           if (updated.code !== 0) throw new Error(updated.error ?? "opencode plugin update failed")
         }
       },
     })
   }
+
+  // Sync the bridge when the plugin moves, when it is broken/missing, or for
+  // the known broken beta.2 (which can inspect as current yet fail at runtime).
   const bridgeBefore = bridgeNeedsRepair(ctx)
-  if (bridgeBefore) {
-    steps.push({
-      id: "sync-bridge",
-      description: "Synchronize the owned bridge extension with the updated plugin (credentials reused)",
-      mutates: true,
-      run: async () => {
-        const result = await bridgeOperation(ctx.runtime, ctx.detection.bridge.credentialValid ? "repair" : "install", {
-          spicetifyPath: ctx.detection.spicetify.path,
-          dryRun: false,
-          yes: true,
-        })
-        if (result.code !== 0) throw new Error(result.error ?? "Bridge synchronization failed")
-      },
-    })
+  const bridgeSyncNeeded = bridgeBefore || pluginSelected || brokenBeta2
+  if (bridgeSyncNeeded) {
+    const reason = brokenBeta2 && !pluginSelected && !bridgeBefore
+      ? "Re-provision the known-broken beta.2 owned bridge (recovery)"
+      : pluginSelected
+        ? "Synchronize the owned bridge to the selected plugin version"
+        : "Repair the owned bridge extension and registration"
+    steps.push(bridgeSyncStep(ctx, reason))
   }
+
   if (!steps.length) {
     ui.success("No supported update is available.")
     return 0
   }
-  const outcome = await executePlan(ctx, "Update plan", steps)
-  if (outcome.status === "dry-run") return 0
-  const code = planExitCode(outcome)
+
+  const code = await presentAndRunPlan(ctx, "Update plan", steps)
   if (code !== 0) {
-    if (combined && spicetifyOutdated) {
-      ui.warn("Completed before this plan: Spicetify CLI upgrade. It is left in place; rerun update to continue with the plugin.")
+    if (spicetifySelected) {
+      ui.warn("Completed before this plan: Spicetify CLI update. It is left in place; rerun update to continue with the plugin.")
     }
     return code
   }
+  if (ctx.options.dryRun) return 0
 
   const next = await detectEnvironment(ctx.runtime)
   ctx.detection = next
-  if (pluginOutdated && latest && !(await verifyVersion(ctx, latest))) {
+  if (pluginSelected && latest && !(await verifyVersion(ctx, latest))) {
     ui.error("The plugin registration did not verify at the requested version. Run `opencode-spotify doctor`.")
     return 1
   }
-  if (!next.bridge.installed || next.bridge.registration !== "current") {
+  if (bridgeSyncNeeded && (!next.bridge.installed || next.bridge.registration !== "current")) {
     ui.error("The bridge is not synchronized after the update. Run `opencode-spotify repair`.")
     return 1
   }
-  const applied = await maybeApplyBridge(ctx, next.spicetify.path, bridgeBefore)
+  const applied = await maybeApplyBridge(ctx, next.spicetify.path, bridgeSyncNeeded)
   if (applied.code !== 0) return applied.code
-  ui.section("Update summary")
-  ui.kv("Plugin", next.opencode.plugin.version ?? latest ?? "unknown")
-  ui.kv("Bridge", "synchronized")
-  ui.kv("Spicetify", next.spicetify.version ?? "unchanged")
-  ui.bullet("Restart running OpenCode processes to load the updated plugin.")
-  ui.bullet("Playback is not verified by this command.")
+  renderUpdateSummary(ui, createUpdateSummary({
+    plugin: {
+      installed: next.opencode.plugin.version ?? installed,
+      target: latest,
+      changed: pluginSelected,
+      verified: pluginSelected,
+    },
+    spicetify: {
+      version: next.spicetify.version ?? spicetifyInstalled,
+      changed: spicetifySelected,
+      owner: next.spicetify.owner,
+    },
+    bridge: {
+      synchronized: bridgeSyncNeeded,
+      applied: applied.applied,
+      pending: bridgeSyncNeeded && !applied.applied,
+    },
+  }))
   return 0
 }
 
 /** Apply a prepared bridge and report pending apply consistently. */
 export async function applyOnly(ctx: OperationContext): Promise<number> {
-  const result = await applyBridge(ctx.runtime, { spicetifyPath: ctx.detection.spicetify.path })
+  const result = await applyBridgeCompat(ctx)
   if (result.code !== 0) {
     ctx.ui.error(`spicetify apply failed${result.error ? `: ${result.error}` : "."}`)
     return 1
@@ -287,3 +723,17 @@ export async function applyOnly(ctx: OperationContext): Promise<number> {
   ctx.ui.success("Spicetify changes applied.")
   return 0
 }
+
+async function applyBridgeCompat(ctx: OperationContext) {
+  const { applyBridge } = await import("./bridge.ts")
+  return applyBridge(cancelAwareRuntime(ctx.runtime, ctx.cancel), {
+    spicetifyPath: ctx.detection.spicetify.path,
+    // B06: apply progress goes to the structured reporter when attached,
+    // with the legacy two-space Ui line otherwise.
+    onProgress: (line) => reportProgressLine(ctx, "apply", line),
+  })
+}
+
+// Keep the imported SpicetifyInfo type referenced for API compatibility with
+// callers that re-export this module's types during the B05 transition.
+export type { SpicetifyInfo }

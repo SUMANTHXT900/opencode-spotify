@@ -1,6 +1,9 @@
 import type {
-  CommandResult, Detection, Logger, OperationContext, Prompter, Runtime, Ui, VersionInfo,
+  CommandResult, Detection, Logger, OperationContext, Presentation, ProgressEvent, ProgressReporter,
+  Prompter, Runtime, Ui, UiMode, VersionInfo,
 } from "../src/cli/types.ts"
+import { createCancelToken } from "../src/cli/cancel.ts"
+import type { InstallerLock, InstallerLockContent } from "../src/cli/lock.ts"
 
 export interface FakeState {
   opencode: { available: boolean; version: string; listVersion: string | null; source: string; local: boolean; native: boolean }
@@ -10,9 +13,20 @@ export interface FakeState {
   spicetifyUpgradeCalls: number
 }
 
+export interface FakeInteractiveCall {
+  file: string
+  args: string[]
+  options?: { cwd?: string; env?: Record<string, string> }
+}
+
 export interface FakeRuntime extends Runtime {
   state: FakeState
   calls: Array<{ file: string; args: string[] }>
+  /** Commands started with inherited stdio (official Spicetify installer). */
+  interactiveCalls: FakeInteractiveCall[]
+  /** Optional backup-payload probes (mirror inspectBackupState's test seams). */
+  fileSize?(path: string): number | null
+  listDir?(path: string): string[] | null
 }
 
 const secret = "a".repeat(64)
@@ -28,6 +42,7 @@ export function fakeRuntime(overrides: Partial<FakeState> = {}): FakeRuntime {
     ...overrides,
   }
   const calls: FakeRuntime["calls"] = []
+  const interactiveCalls: FakeInteractiveCall[] = []
   const appData = "C:\\Users\\Test\\AppData\\Roaming"
   const config = "C:\\Users\\Test\\.config\\opencode\\opencode.json"
   const spicetifyConfig = `${appData}\\spicetify\\config-xpui.ini`
@@ -36,6 +51,7 @@ export function fakeRuntime(overrides: Partial<FakeState> = {}): FakeRuntime {
   const runtime: FakeRuntime = {
     state,
     calls,
+    interactiveCalls,
     platform: "win32",
     arch: "x64",
     env: { APPDATA: appData, TEMP: "C:\\Temp" },
@@ -88,6 +104,11 @@ export function fakeRuntime(overrides: Partial<FakeState> = {}): FakeRuntime {
       if (file.includes("winget") || file.includes("scoop") || file.includes("choco")) return ok("")
       return { code: 1, stdout: "", stderr: "unexpected command" }
     },
+    async runInteractive(file, args, options) {
+      interactiveCalls.push({ file, args: [...args], ...(options ? { options } : {}) })
+      calls.push({ file, args: [...args] })
+      return ok("interactive command complete")
+    },
     async which(name) {
       if (name === "opencode") return "C:\\Tools\\opencode.exe"
       if (name === "spicetify") return state.spicetify.available ? "C:\\Users\\Test\\AppData\\Local\\spicetify\\spicetify.exe" : undefined
@@ -101,6 +122,14 @@ export function fakeRuntime(overrides: Partial<FakeState> = {}): FakeRuntime {
     },
     isFile(path) {
       return path === config || path === spicetifyConfig || path === extension || path === credential
+    },
+    // Simulate a complete, plausible Spicetify backup when one is present.
+    // Tests that need an invalid payload override these probes directly.
+    fileSize(path) {
+      return path.toLowerCase().includes("\\backup\\") ? 5_000_000 : null
+    },
+    listDir(path) {
+      return path.toLowerCase().endsWith("\\backup") ? ["xpui.spa", "login.spa"] : null
     },
     readText(path) {
       if (path === credential) return JSON.stringify({ version: 1, secret, origins: [], installed: state.bridge.installed })
@@ -163,11 +192,12 @@ export function fakeDetection(runtime: FakeRuntime, overrides: Partial<Detection
   }
 }
 
-export function fakeUi(): Ui & { lines: string[]; jsonValue: unknown } {
+export function fakeUi(): Ui & { lines: string[]; jsonValue: unknown; closedCount: number } {
   const lines: string[] = []
   const api = {
     lines,
     jsonValue: undefined as unknown,
+    closedCount: 0,
     banner() {}, title() {}, section: (text: string) => lines.push(text), line: (text: string) => lines.push(text),
     kv: (key: string, value: string) => lines.push(`${key}: ${value}`),
     status: (kind: string, text: string) => lines.push(`${kind}: ${text}`), bullet: (text: string) => lines.push(text),
@@ -175,8 +205,11 @@ export function fakeUi(): Ui & { lines: string[]; jsonValue: unknown } {
     success: (text: string) => lines.push(`ok: ${text}`),
     json(value: unknown) { api.jsonValue = value },
     dryRun: (text: string) => lines.push(`dry: ${text}`),
+    async suspend() {},
+    async resume() {},
+    async close() { api.closedCount += 1 },
   }
-  return api as Ui & { lines: string[]; jsonValue: unknown }
+  return api as Ui & { lines: string[]; jsonValue: unknown; closedCount: number }
 }
 
 export function fakePrompt(answers: { choices?: Array<string | undefined>; confirms?: boolean[] } = {}): Prompter & { asked: string[] } {
@@ -197,18 +230,63 @@ export function fakeLogger(): Logger & { lines: string[] } {
   return { lines, out: (line) => lines.push(line), err: (line) => lines.push(line) }
 }
 
+/**
+ * Structured progress reporter fake. Events keep their emission order and use
+ * a deterministic `at` counter so tests can assert sequences without clocks.
+ */
+export function fakeReport(): ProgressReporter & { events: ProgressEvent[] } {
+  const events: ProgressEvent[] = []
+  const at = () => events.length
+  return {
+    events,
+    emit(event) { events.push(event) },
+    phase(phase, label) { events.push({ type: "phase", phase, label: label ?? phase, at: at() }) },
+    step(id, status, detail) { events.push({ type: "step", id, status, ...(detail ? { detail } : {}), at: at() }) },
+    log(level, message) { events.push({ type: "log", level, message, at: at() }) },
+    progress(scope, message, percent) { events.push({ type: "progress", scope, message, ...(percent === undefined ? {} : { percent }), at: at() }) },
+    prompt(request) { events.push({ type: "prompt", request, at: at() }) },
+  }
+}
+
+export interface FakePresentation extends Presentation {
+  closes: number
+}
+
+/** Presentation fake for fallback tests; `close()` is idempotent and counted. */
+export function fakePresentation(
+  mode: UiMode = "plain",
+  parts: { ui?: Ui; prompt?: Prompter; report?: ProgressReporter } = {},
+): FakePresentation {
+  let closed = false
+  const presentation = {
+    mode,
+    ui: parts.ui ?? fakeUi(),
+    prompt: parts.prompt ?? fakePrompt(),
+    report: parts.report ?? fakeReport(),
+    closes: 0,
+    async close() {
+      if (closed) return
+      closed = true
+      presentation.closes += 1
+    },
+  }
+  return presentation
+}
+
 export function context(
   runtime: FakeRuntime,
   ui = fakeUi(),
   prompt = fakePrompt(),
   options: Partial<OperationContext["options"]> = {},
   versions?: { plugin?: Partial<VersionInfo>; spicetify?: Partial<VersionInfo> },
+  report: ProgressReporter = fakeReport(),
+  cancel: OperationContext["cancel"] = createCancelToken(),
 ): OperationContext {
   const log = fakeLogger()
   const baseOptions: OperationContext["options"] = {
     command: "setup", dryRun: false, yes: false, json: false, color: false, offline: false, verbose: false,
     help: false, version: false, nonInteractive: false, spicetify: "ask", apply: false,
-    allowSpicetifyUpgrade: false, removeCredentials: false, ...options,
+    allowSpicetifyUpgrade: false, acceptOlderWinget: false, removeCredentials: false, ...options,
   }
   return {
     options: baseOptions,
@@ -217,10 +295,50 @@ export function context(
     prompt,
     detection: fakeDetection(runtime),
     installerVersion: "0.6.0-beta.1",
+    cancel,
     versions: {
       plugin: { installed: runtime.state.opencode.listVersion, latest: null, ...versions?.plugin },
       spicetify: { installed: runtime.state.spicetify.version, latest: null, ...versions?.spicetify },
     },
     log,
+    report,
   }
+}
+
+/**
+ * In-memory InstallerLock for unit tests and future lock-aware steps. No file
+ * is created; release/assertHeld semantics mirror the real handle.
+ */
+export function fakeInstallerLock(
+  overrides: Partial<InstallerLockContent> = {},
+): InstallerLock & { releases: number; held: boolean } {
+  const content: InstallerLockContent = {
+    schemaVersion: 1,
+    pid: process.pid,
+    startedAt: 0,
+    processStartTime: null,
+    command: "setup",
+    host: "test-host",
+    nonce: "test-nonce-0001",
+    ...overrides,
+  }
+  const api = {
+    path: "C:\\Users\\Test\\AppData\\Local\\opencode-spotify\\installer.lock",
+    content,
+    nonce: content.nonce,
+    releases: 0,
+    held: true,
+    async release() {
+      api.releases += 1
+      api.held = false
+    },
+    async assertHeld() {
+      if (!api.held) throw new Error("installer lock is no longer held")
+      return content
+    },
+    async isHeld() {
+      return api.held
+    },
+  }
+  return api
 }

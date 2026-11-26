@@ -4,14 +4,46 @@ version: 2
 # security updates use a separate fixed limit and are unaffected, and
 # Dependabot alerts keep reporting. Re-enable after stable by restoring a
 # non-zero limit (weekly cadence below) following reviewed QA.
+#
+# Coherent groups are declared now so re-enabling is a one-line limit flip:
+# - renderer: @opentui/* + solid-js stay in lockstep (exact transitive/native pair)
+# - installer-ui: ink/react/@inkjs/ui + types float on patches only (bounded ~ policy)
+# Both groups cover minor+patch only; major updates stay ungrouped and
+# reviewable as separate controlled PRs. Production pins stay exact/tilde per
+# the manifest policy; no version upgrade ships from this file.
 updates:
   - package-ecosystem: npm
     directory: /plugin
     schedule:
       interval: weekly
     open-pull-requests-limit: 0
+    groups:
+      renderer:
+        patterns:
+          - "@opentui*"
+          - "solid-js"
+        update-types:
+          - "minor"
+          - "patch"
+      installer-ui:
+        patterns:
+          - "ink"
+          - "react"
+          - "@inkjs*"
+          - "@types/react"
+          - "ink-testing-library"
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 0
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

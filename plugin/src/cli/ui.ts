@@ -47,6 +47,12 @@ export function createUi(log: Logger, options: { color: boolean; json: boolean }
     success: (text) => write(`  ${paint(color, ansi.green, "[OK]")} ${text}`),
     json(value) { log.out(JSON.stringify(value, null, 2)) },
     dryRun: (step) => write(`  ${paint(color, ansi.cyan, "[dry-run]")} ${step}`),
+    // Plain output owns no alternate screen or live region: terminal
+    // suspend/resume and close are deliberate no-ops so callers can use the
+    // same lifecycle around interactive children in every presentation mode.
+    async suspend() {},
+    async resume() {},
+    async close() {},
   }
 }
 

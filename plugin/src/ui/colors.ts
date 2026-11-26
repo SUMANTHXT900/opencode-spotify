@@ -3,7 +3,7 @@ import { parseColor, RGBA, resolveImageRenderProtocol, type ColorInput, type Ter
 // V0.5 monochrome system: lyrics and chrome use only the host theme's text
 // (white) and muted (dim) tones. The only color in the UI is the true album-art
 // image pixels rendered by <image>. Accent hues, album-derived palettes,
-// ambient gradients and karaoke fills were removed; see UI_UX_DESIGN.md.
+// ambient gradients and karaoke fills were removed; see docs/ARCHITECTURE.md.
 export function contrast(foreground: RGBA, background: RGBA) {
   const luminance = (color: RGBA) => {
     const c = color.toInts().slice(0, 3).map((n) => n / 255).map((v) => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)

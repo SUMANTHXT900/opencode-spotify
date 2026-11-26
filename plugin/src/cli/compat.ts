@@ -4,6 +4,45 @@ export const MIN_OPENCODE = "2.3.0"
 export const MIN_SPICETIFY = "2.0.0"
 export const BRIDGE_PORT = 18765
 
+/** Upstream repository used for release discovery (stable channel only). */
+export const SPICETIFY_REPO = "spicetify/cli"
+
+/** Official Spicetify installer script pin (A02 evidence, 2026-11-26). */
+export const OFFICIAL_INSTALLER_URL =
+  "https://raw.githubusercontent.com/spicetify/cli/f4a824fbbe07233adeab889328e6fefdc274660b/install.ps1"
+export const OFFICIAL_INSTALLER_COMMIT = "f4a824fbbe07233adeab889328e6fefdc274660b"
+export const OFFICIAL_INSTALLER_SHA256 = "e65d1651dc6e3eacbcb58a56f2979f75ad1af16423b114d78d411312c0a8e22e"
+export const OFFICIAL_INSTALLER_BYTES = 8307
+
+/**
+ * Reviewed Marketplace-removal patch (B27 / I3). The executed script is the
+ * pinned original with exactly one reviewed 19-line comment block replacing
+ * lines 224-242. Both the original and patched bytes are verified before the
+ * child starts; there is no fallback to the unmodified script.
+ */
+export const OFFICIAL_INSTALLER_PATCHED_BYTES = 8236
+export const OFFICIAL_INSTALLER_PATCHED_SHA256 =
+  "056da19ece34be8c3d8543d0f98ff8ba08651bd384d4dc3a8d3dc9e72a7bf172"
+export const OFFICIAL_INSTALLER_MARKETPLACE_BLOCK_BYTES = 1029
+export const OFFICIAL_INSTALLER_MARKETPLACE_BLOCK_SHA256 =
+  "5689b770f84bfedd40b03f08d811107f0be83619e89e8452ccf114de78927d3f"
+export const OFFICIAL_INSTALLER_MARKETPLACE_BLOCK_LINES = 19
+
+/**
+ * Per-release reviewed artifact evidence. This is NOT a release target: it only
+ * tightens post-install verification when a specific release was actually
+ * reviewed. Never use it to substitute a target or to claim "pinned" for a
+ * release that has no matching digest.
+ */
+export const REVIEWED_SPICETIFY_RELEASES: Readonly<
+  Record<string, Readonly<{ sha256: string; size: number }>>
+> = {
+  "2.46.7": {
+    sha256: "de7db28c1dc2fd7d4c0ecdfd8f2eaa5809d677c86628c7ae290d3c11af000cf6",
+    size: 11829528,
+  },
+}
+
 export function parseVersion(value: string | null | undefined): [number, number, number] | null {
   if (!value) return null
   const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/i)

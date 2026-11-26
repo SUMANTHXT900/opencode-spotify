@@ -1,0 +1,5 @@
+# Snapshot frames are byte-level fixtures: keep them LF so the normalized
+# comparison is identical on Windows checkouts with core.autocrlf=true.
+snapshots/** text eol=lf
+*.ts text eol=lf
+*.md text eol=lf

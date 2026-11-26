@@ -19,7 +19,10 @@ function defaults(): CliOptions {
     spicetify: "ask",
     apply: false,
     allowSpicetifyUpgrade: false,
+    acceptOlderWinget: false,
     removeCredentials: false,
+    complete: false,
+    plain: false,
   }
 }
 
@@ -56,9 +59,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--offline": options.offline = true; break
       case "--verbose": options.verbose = true; break
       case "--non-interactive": options.nonInteractive = true; break
+      case "--plain": case "--no-ink": options.plain = true; break
       case "--apply": options.apply = true; break
       case "--allow-spicetify-upgrade": options.allowSpicetifyUpgrade = true; break
+      case "--accept-older-winget": options.acceptOlderWinget = true; break
       case "--remove-credentials": options.removeCredentials = true; break
+      case "--complete": options.complete = true; break
       case "--package-spec": {
         const spec = value ?? argv[++index]
         if (!spec || spec.startsWith("-")) return { options, error: "--package-spec requires a value" }
@@ -106,9 +112,13 @@ Options:
   --spicetify <mode>        ask (default), auto, manual, or skip
   --apply                   Run spicetify apply after bridge preparation (confirm separately)
   --allow-spicetify-upgrade Permit a combined Spicetify CLI update
+  --accept-older-winget     Deprecated no-op (retained for compatibility; Winget flow retired)
   --remove-credentials      Separately confirmed credential removal on uninstall
+  --complete                Complete removal: interactive typed UNINSTALL, or --non-interactive + --yes
   --package-spec <spec>     Override the npm spec used for global registration
   --non-interactive         Never prompt; missing consent is an error
+  --plain                   Force plain-text output (no Ink UI)
+  --no-ink                  Alias for --plain
   -h, --help                Show this help
   -v, --version             Show the installer version
 
@@ -118,6 +128,6 @@ Examples:
   opencode-spotify status --json
   opencode-spotify doctor
   opencode-spotify update --dry-run
-  npx opencode-spotify@0.6.0-beta.2 setup
+  npx opencode-spotify@0.6.0-beta.3 setup
 `
 }

@@ -2,18 +2,35 @@
 
 Windows-only project. Keep changes reviewable and avoid unrelated work.
 
+## User install vs dev setup
+
+To **use** the plugin, install the published package — do not clone the repo.
+(Until `0.6.0-beta.3` is published, use the local-tarball path in
+[docs/USER_GUIDE.md](docs/USER_GUIDE.md#install-walkthrough) instead of `npx`.)
+
+```powershell
+opencode plugin add opencode-spotify@0.6.0-beta.3
+npx opencode-spotify@0.6.0-beta.3 setup
+```
+
+See the [README](README.md) and [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
+Clone and follow the setup below only to **develop** the plugin.
+
 ## Setup
 
 ```powershell
 Set-Location plugin
-npm ci --ignore-scripts --no-audit
+npm ci --ignore-scripts --no-audit --no-fund
+npm run test:accounting
 npm run typecheck
-npm run test:fast
+npm test
 ```
 
-The full suite (`npm test`, rendering, VT, artwork, `npm run verify:package`)
-is required before any release preparation. Rendering fixtures need Bun 1.3.14;
-`pwsh` is required by the Windows test fixtures.
+`npm test` runs the Node bucket. Release preparation also requires the native
+`test:bun`, persistent `test:vt`, bridge syntax, dependency audit, workflow
+validation, and `verify:package` gates. The native fixtures need Bun ≥ 1.3.14;
+`pwsh` is required by the Windows tests. See
+[docs/MAINTAINERS.md](docs/MAINTAINERS.md) for the CI gate layout.
 
 ## Rules
 
@@ -30,9 +47,12 @@ is required before any release preparation. Rendering fixtures need Bun 1.3.14;
 
 ## Pull requests
 
-- One topic per PR; include automated test evidence (`typecheck`, `test:fast`
-  or full `test`, plus rendering/pack gates when touched).
+- One topic per PR; include automated test evidence (`typecheck`, `npm test`,
+  plus rendering or packaging gates when touched).
 - Do not commit `bridge.json`, backups, credentials, captures, screenshots
   with private content, or `release-artifacts/` tarballs.
 - Public-repo note: this project ships no secrets. Report vulnerabilities
   privately per `SECURITY.md`, never in a public issue.
+- For CI internals, the installer trust spec, and the release process, see
+  [docs/MAINTAINERS.md](docs/MAINTAINERS.md). For the developer install
+  checklist, see [docs/RELEASE_QA.md](docs/RELEASE_QA.md).

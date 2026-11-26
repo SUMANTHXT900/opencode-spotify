@@ -26,5 +26,11 @@ handling, bridge auth, installer command execution, secret leaks).
   (0600/0700, symlink-refused) and are never printed or packed.
 - The installer never terminates unrelated processes or edits unrelated
   OpenCode plugins, themes, extensions, or backups.
+- The bridge authenticates (mutual HMAC over loopback) but does not encrypt
+  loopback traffic. Same-user malware, administrators, equally privileged
+  Spotify extensions, compromised authorized OpenCode clients, and active
+  privileged local relays are outside the isolation guarantees. See
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary and
+  residual risks.
 - Spotify/Spicetify/OpenCode/OpenTUI retain their own terms; optional lyric
   providers retain theirs.

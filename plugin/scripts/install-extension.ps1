@@ -29,6 +29,27 @@ if ($registrations.Count -gt 1) { throw 'Ambiguous extension configuration; revi
 $registered = $registrations | Select-Object -First 1
 $extensionNames = @()
 if ($registered) { $extensionNames = @(($registered -split '=', 2)[1] -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+function Set-ExtensionsRegistration([bool]$Remove) {
+  if ($Remove -and -not $registered) { return }
+  $names = @($extensionNames | Where-Object { $_ -ne $name })
+  if (-not $Remove) { $names += $name }
+  $value = $names -join '|'
+  if ($registered) {
+    $updated = @($lines | ForEach-Object { if ($_ -match '^\s*extensions\s*=') { "extensions = $value" } else { $_ } })
+    [System.IO.File]::WriteAllLines($config, [string[]]$updated, [System.Text.UTF8Encoding]::new($false))
+  } elseif (-not $Remove) {
+    $updated = [System.Collections.Generic.List[string]]::new()
+    $inserted = $false
+    foreach ($line in $lines) {
+      $updated.Add($line)
+      if ($line -match '^\s*\[AdditionalOptions\]\s*$') { $updated.Add("extensions = $value"); $inserted = $true }
+    }
+    if (-not $inserted) { $updated.Add('[AdditionalOptions]'); $updated.Add("extensions = $value") }
+    [System.IO.File]::WriteAllLines($config, $updated, [System.Text.UTF8Encoding]::new($false))
+  }
+  $verified = (Select-String -LiteralPath $config -Pattern '^\s*extensions\s*=').Line
+  if (($verified -split '=', 2)[1].Trim() -ne $value) { throw 'Registration verification failed; restore backup if needed.' }
+}
 Write-Host "Config: $config"
 Write-Host "Extension target: $target"
 Write-Host "Existing copy: $(Test-Path -LiteralPath $target)"
@@ -55,9 +76,6 @@ if (-not $Yes) {
   if ($ResetCredentials -and (Read-Host 'Rotate credentials? All running OpenCode sessions must restart. Type RESET') -cne 'RESET') { exit }
 }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-ffff'
-Copy-Item -LiteralPath $config -Destination "$config.spotify-backup-$stamp"
-New-Item -ItemType Directory -Force -Path $directory | Out-Null
-if (Test-Path -LiteralPath $target) { Copy-Item -LiteralPath $target -Destination "$target.backup-$stamp" }
 function Protect-UserFile([string]$Path) {
   if ($IsWindows) {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -68,8 +86,25 @@ function Protect-UserFile([string]$Path) {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict credential file permissions.' }
   }
 }
+# D14: an uninstall must never create new backup copies. Install/repair keep the
+# timestamped rollback copies; uninstall deletes only and creates nothing.
+$configBackup = "$config.spotify-backup-$stamp"
+$extensionBackup = "$target.backup-$stamp"
+$hadTarget = Test-Path -LiteralPath $target
+$secretBackups = @()
+if (-not $Uninstall) {
+  Copy-Item -LiteralPath $config -Destination $configBackup
+  New-Item -ItemType Directory -Force -Path $directory | Out-Null
+  # L8: the extension copy embeds the signing secret, so restrict it immediately
+  # (same ACL as the live files) instead of waiting until provisioning succeeds.
+  if ($hadTarget) {
+    Copy-Item -LiteralPath $target -Destination $extensionBackup
+    Protect-UserFile $extensionBackup
+  }
+}
 $root = if ($IsWindows) { Join-Path ($env:APPDATA ?? (Join-Path $HOME 'AppData\Roaming')) 'opencode-spotify' } elseif ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'opencode-spotify' } else { Join-Path $HOME '.config/opencode-spotify' }
 $credentialPath = Join-Path $root 'bridge.json'
+$credentialBackup = "$credentialPath.backup-$stamp"
 if (-not $Uninstall) {
   New-Item -ItemType Directory -Force -Path $root | Out-Null
   if ((Get-Item -LiteralPath $root).LinkType) { throw 'Refusing symbolic-link credential directory.' }
@@ -81,46 +116,77 @@ if (-not $Uninstall) {
   if (Test-Path -LiteralPath $credentialPath) {
     Protect-UserFile $credentialPath
     if ($ResetCredentials) {
-      Copy-Item -LiteralPath $credentialPath -Destination "$credentialPath.backup-$stamp"
-      Protect-UserFile "$credentialPath.backup-$stamp"
+      Copy-Item -LiteralPath $credentialPath -Destination $credentialBackup
+      Protect-UserFile $credentialBackup
     }
   }
   $reset = if ($ResetCredentials) { 'reset' } else { 'reuse' }
-  & node $helper install $target $reset $source
-  if ($LASTEXITCODE -ne 0) { throw 'Provisioning failed. Re-run -Repair; existing backups are preserved.' }
-  Protect-UserFile $credentialPath
-  Protect-UserFile $target
+  # L1: build the extension beside the live target, verify it, and only then
+  # move it into place and update the extensions registration. A syntax failure
+  # leaves the previous extension and registration untouched.
+  # Keep a .js suffix so `node --check` parses it as the extension it will be.
+  $pending = "$target.pending-$stamp.js"
+  $installed = $false
+  try {
+    if (Test-Path -LiteralPath $pending) { Remove-Item -LiteralPath $pending -Force }
+    & node $helper install $pending $reset $source
+    if ($LASTEXITCODE -ne 0) { throw 'Provisioning failed. Re-run -Repair; existing backups are preserved.' }
+    Protect-UserFile $pending
+    & node --check $pending
+    if ($LASTEXITCODE -ne 0) { throw 'Installed extension syntax check failed; configuration and the existing registration were not changed.' }
+    Move-Item -LiteralPath $pending -Destination $target -Force
+    $installed = $true
+    Protect-UserFile $target
+    Protect-UserFile $credentialPath
+    Set-ExtensionsRegistration $false
+  } catch {
+    if (Test-Path -LiteralPath $configBackup) { Copy-Item -LiteralPath $configBackup -Destination $config -Force }
+    # A failed rotation must not pair a new secret with the old live extension.
+    if ($ResetCredentials -and (Test-Path -LiteralPath $credentialBackup)) {
+      Copy-Item -LiteralPath $credentialBackup -Destination $credentialPath -Force
+      Protect-UserFile $credentialPath
+    }
+    if ($installed) {
+      if ($hadTarget -and (Test-Path -LiteralPath $extensionBackup)) {
+        Copy-Item -LiteralPath $extensionBackup -Destination $target -Force
+        Protect-UserFile $target
+      } elseif (-not $hadTarget -and (Test-Path -LiteralPath $target)) {
+        Remove-Item -LiteralPath $target -Force
+      }
+    }
+    throw
+  } finally {
+    if (Test-Path -LiteralPath $pending) { Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue }
+  }
 } else {
   if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target }
   if (Test-Path -LiteralPath $credentialPath) {
     & node $helper uninstall
     if ($LASTEXITCODE -ne 0) { throw 'Cannot mark extension uninstalled.' }
   }
-}
-if (Test-Path -LiteralPath "$target.backup-$stamp") { Protect-UserFile "$target.backup-$stamp" }
-$names = @($extensionNames | Where-Object { $_ -ne $name })
-if (-not $Uninstall) { $names += $name }
-$value = $names -join '|'
-if ($registered) {
-  $updated = @($lines | ForEach-Object { if ($_ -match '^\s*extensions\s*=') { "extensions = $value" } else { $_ } })
-  [System.IO.File]::WriteAllLines($config, [string[]]$updated, [System.Text.UTF8Encoding]::new($false))
-} elseif (-not $Uninstall) {
-  $updated = [System.Collections.Generic.List[string]]::new()
-  $inserted = $false
-  foreach ($line in $lines) {
-    $updated.Add($line)
-    if ($line -match '^\s*\[AdditionalOptions\]\s*$') { $updated.Add("extensions = $value"); $inserted = $true }
+  Set-ExtensionsRegistration $true
+  # L8: earlier installs may have left secret-bearing rollback copies. This
+  # uninstall creates none; verify what remains, protect it and disclose it.
+  if (Test-Path -LiteralPath $directory) {
+    $secretBackups += @(Get-ChildItem -LiteralPath $directory -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like "$name.backup-*" } | ForEach-Object { $_.FullName })
   }
-  if (-not $inserted) { $updated.Add('[AdditionalOptions]'); $updated.Add("extensions = $value") }
-  [System.IO.File]::WriteAllLines($config, $updated, [System.Text.UTF8Encoding]::new($false))
+  if (Test-Path -LiteralPath $root) {
+    $secretBackups += @(Get-ChildItem -LiteralPath $root -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like 'bridge.json.backup-*' } | ForEach-Object { $_.FullName })
+  }
+  foreach ($backupFile in $secretBackups) { Protect-UserFile $backupFile }
 }
-$verified = (Select-String -LiteralPath $config -Pattern '^\s*extensions\s*=').Line
-if (($verified -split '=', 2)[1].Trim() -ne $value) { throw 'Registration verification failed; restore backup if needed.' }
 if (-not $Uninstall) {
-  & node --check $target
-  if ($LASTEXITCODE -ne 0) { throw 'Installed extension syntax check failed.' }
+  Write-Host "Backups: .spotify-backup-$stamp (config), .backup-$stamp (extension)."
+  if ($ResetCredentials) { Write-Host "Credential backup: $credentialPath.backup-$stamp contains the signing secret; delete it when you no longer need a rollback." }
+} else {
+  if ($secretBackups.Count -gt 0) {
+    Write-Host "Secret-bearing rollback copies were kept: $($secretBackups -join '; ')."
+    Write-Host 'These copies contain the previous signing secret; delete them once rollback is no longer needed.'
+  }
+  Write-Host 'No new config, extension or credential backup copies were created for this uninstall.'
 }
-Write-Host "Backups: .spotify-backup-$stamp (config), .backup-$stamp (extension)."
 if ($SkipApply) { if ($Uninstall) { Write-Host 'Bridge removed from files/configuration; run spicetify apply to finish removing it from the running Spotify client.' } else { Write-Host 'Files prepared; run spicetify apply when ready. The old running extension remains active until applied.' } }
 elseif ($Yes) {
   & $spicetifyCommand apply

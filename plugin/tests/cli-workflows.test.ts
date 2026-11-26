@@ -6,7 +6,8 @@ import { runSetup } from "../src/cli/setup.ts"
 import { runUpdate } from "../src/cli/update.ts"
 import { runRepair } from "../src/cli/repair.ts"
 import { runUninstall } from "../src/cli/uninstall.ts"
-import { context, fakeDetection, fakePrompt, fakeRuntime, fakeUi } from "./cli-fixture.ts"
+import { context, fakeDetection, fakePrompt, fakeReport, fakeRuntime, fakeUi } from "./cli-fixture.ts"
+import { createCancelToken } from "../src/cli/cancel.ts"
 
 const mutating = (calls: Array<{ file: string; args: string[] }>) =>
   calls.filter((call) => call.file.includes("opencode") && ["add", "remove", "update"].includes(call.args[1] ?? "") ||
@@ -188,17 +189,34 @@ test("update refuses downgrades and unknown registry state", async () => {
 test("combined update upgrades Spicetify first, then the plugin", async () => {
   const runtime = fakeRuntime()
   runtime.state.opencode.listVersion = "0.5.7"
+  runtime.state.spicetify.version = "2.46.0"
+  const which = runtime.which.bind(runtime)
+  runtime.which = async (name: string) => (name === "winget" ? "C:\\winget.exe" : which(name))
   const ui = fakeUi()
   const ctx = context(runtime, ui, fakePrompt(), { command: "update", yes: true, allowSpicetifyUpgrade: true })
   ctx.detection = fakeDetection(runtime)
+  ctx.detection.spicetify = {
+    ...ctx.detection.spicetify,
+    owner: "winget",
+    path: "C:\\Users\\Test\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Spicetify.Spicetify\\spicetify.exe",
+  }
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
   assert.equal(await runUpdate(ctx, "both"), 0, ui.lines.join("\n"))
   const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
-  const upgrade = commands.findIndex((command) => command.endsWith("spicetify.exe upgrade"))
   const add = commands.findIndex((command) => command.includes("plugin add"))
-  assert.ok(upgrade >= 0 && add > upgrade, "Spicetify upgrade must precede the plugin update")
-  assert.equal(runtime.state.spicetifyUpgradeCalls, 1)
+  const upgrade = commands.findIndex((command) => command.startsWith("C:\\winget.exe upgrade"))
+  assert.ok(add >= 0, "plugin update must run")
+  assert.ok(upgrade >= 0, "Spicetify update must run through its owner")
+  assert.ok(upgrade < add, "Spicetify step must precede the plugin update")
+  // Owner-safe Spicetify route never uses the unverified self-updater.
+  assert.ok(!commands.some((command) => command === "C:\\Users\\Test\\AppData\\Local\\spicetify\\spicetify.exe upgrade"),
+    "combined update must not invoke spicetify.exe upgrade")
+  const text = ui.lines.join("\n")
+  const spicetifyStep = text.indexOf("Spicetify")
+  const pluginStep = text.indexOf("plugin add")
+  assert.ok(spicetifyStep >= 0 && (pluginStep < 0 || spicetifyStep < pluginStep),
+    "Spicetify step must precede the plugin update")
 })
 
 test("repair re-registers and repairs only owned components", async () => {
@@ -219,6 +237,10 @@ test("repair re-registers and repairs only owned components", async () => {
 
 test("uninstall removes only the registration and owned bridge, keeping credentials by default", async () => {
   const runtime = fakeRuntime()
+  // A real bridge.json always implies its credential directory exists.
+  const realExists = runtime.exists.bind(runtime)
+  runtime.exists = (path: string) =>
+    path === "C:\\Users\\Test\\AppData\\Roaming\\opencode-spotify" || realExists(path)
   const ui = fakeUi()
   const ctx = context(runtime, ui, fakePrompt({ confirms: [true] }), { command: "uninstall", yes: true })
   ctx.detection = fakeDetection(runtime)
@@ -236,6 +258,43 @@ test("uninstall cancellation performs no mutation", async () => {
   ctx.detection = fakeDetection(runtime)
   assert.equal(await runUninstall(ctx), 130)
   assert.equal(runtime.calls.length, 0)
+})
+
+test("update cancellation returns 130, never 1, and never starts the next step", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.5.7"
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "update", yes: true, nonInteractive: true })
+  ctx.detection = fakeDetection(runtime)
+  ctx.versions.plugin.latest = "0.6.0-beta.1"
+  const realRun = runtime.run.bind(runtime)
+  runtime.run = (async (file: string, args: string[], options?: unknown) => {
+    const result = await realRun(file, args, options as never)
+    // Cancel while the protected registration step is in flight.
+    if (file.includes("opencode") && args[1] === "add") ctx.cancel.request("sigint")
+    return result
+  }) as typeof runtime.run
+
+  assert.equal(await runUpdate(ctx), 130, ui.lines.join("\n"))
+  assert.equal(ctx.cancel.phase, "partial")
+  const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
+  assert.ok(commands.some((command) => command.includes("plugin add")), "the protected step finished")
+  assert.ok(!commands.some((command) => command.includes("install-extension.ps1")), "the next step never started")
+})
+
+test("a pre-cancelled update returns 130 with no calls", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.5.7"
+  const cancel = createCancelToken()
+  cancel.request("sigterm")
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "update", yes: true, nonInteractive: true }, undefined, fakeReport(), cancel)
+  ctx.detection = fakeDetection(runtime)
+  ctx.versions.plugin.latest = "0.6.0-beta.1"
+
+  assert.equal(await runUpdate(ctx), 130)
+  assert.equal(runtime.calls.length, 0)
+  assert.equal(cancel.phase, "cancelled")
 })
 
 test("dry-run never executes update, repair, or uninstall mutations", async () => {
@@ -264,4 +323,152 @@ test("combined update without explicit authorization is refused before any comma
   ctx.versions.spicetify.latest = "2.47.0"
   assert.equal(await runUpdate(ctx, "both"), 1)
   assert.equal(mutating(runtime.calls).length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// Cancellation / failure precedence (H1) and truthful summaries (H3)
+// ---------------------------------------------------------------------------
+
+function freshInstallRuntime(): ReturnType<typeof fakeRuntime> {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = null
+  runtime.state.bridge.installed = false
+  runtime.state.bridge.extensionCurrent = false
+  runtime.state.spicetify.registered = false
+  return runtime
+}
+
+function overridePluginAdd(
+  runtime: ReturnType<typeof fakeRuntime>,
+  outcome: { code: number; cancelled?: boolean; error?: string; after?: () => void },
+): void {
+  const realRun = runtime.run.bind(runtime)
+  runtime.run = (async (file: string, args: string[], options?: unknown) => {
+    if (file.includes("opencode") && args[1] === "add") {
+      // A code-0 override exercises the real registration mutation; a failure
+      // or cancellation is returned directly so no state is "recovered".
+      const result = outcome.code === 0
+        ? await realRun(file, args, options as never)
+        : { code: 0, stdout: "", stderr: "" }
+      outcome.after?.()
+      return {
+        ...result,
+        code: outcome.code,
+        ...(outcome.cancelled ? { cancelled: true as const } : {}),
+        ...(outcome.error ? { error: outcome.error } : {}),
+      }
+    }
+    return realRun(file, args, options as never)
+  }) as typeof runtime.run
+}
+
+test("setup keeps a real failure (1) when cancellation is requested concurrently", async () => {
+  const runtime = freshInstallRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "setup", yes: true })
+  ctx.detection = fakeDetection(runtime)
+  overridePluginAdd(runtime, {
+    code: 1,
+    error: "registry unavailable",
+    after: () => ctx.cancel.request("sigint"),
+  })
+
+  assert.equal(await runSetup(ctx), 1, ui.lines.join("\n"))
+  assert.ok(ctx.cancel.requested, "cancellation really was requested")
+})
+
+test("setup maps a cancelled registration result to 130, not a generic failure", async () => {
+  const runtime = freshInstallRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "setup", yes: true })
+  ctx.detection = fakeDetection(runtime)
+  overridePluginAdd(runtime, { code: 130, cancelled: true, error: "Cancelled by the user." })
+
+  assert.equal(await runSetup(ctx), 130, ui.lines.join("\n"))
+  assert.equal(ctx.cancel.phase, "cancelled")
+  const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
+  assert.ok(!commands.some((command) => command.includes("install-extension.ps1")), "no bridge work after cancellation")
+})
+
+test("registration-only setup does not prompt for spicetify apply and says the bridge is current", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = null
+  const prompt = fakePrompt()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, prompt, { command: "setup", yes: true })
+  ctx.detection = fakeDetection(runtime)
+
+  assert.equal(await runSetup(ctx), 0, ui.lines.join("\n"))
+  const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
+  assert.ok(commands.some((command) => command.includes("plugin add")))
+  assert.ok(!commands.some((command) => command.includes("spicetify apply")), "no apply when the bridge is already current")
+  assert.deepEqual(prompt.asked, [], "no apply prompt for a registration-only run")
+  const text = ui.lines.join("\n")
+  assert.match(text, /already active; no apply needed/i)
+  assert.ok(!/apply is still pending/i.test(text), text)
+})
+
+test("a cancelled setup reports which steps completed and which were skipped", async () => {
+  const runtime = freshInstallRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "setup", yes: true })
+  ctx.detection = fakeDetection(runtime)
+  overridePluginAdd(runtime, { code: 0, after: () => ctx.cancel.request("sigint") })
+
+  assert.equal(await runSetup(ctx), 130, ui.lines.join("\n"))
+  const text = ui.lines.join("\n")
+  assert.match(text, /Completed steps: register-global-plugin/)
+  assert.match(text, /Not run: bridge-repair/)
+  // A cancelled run must not claim the bridge was prepared/applied.
+  assert.ok(!/Bridge: (prepared|prepared and applied)/i.test(text), text)
+})
+
+test("setup keeps confirmation-required (2) when cancellation is requested during the plan", async () => {
+  const runtime = freshInstallRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "setup", nonInteractive: true, yes: false })
+  ctx.detection = fakeDetection(runtime)
+  // Use the legacy plan screen so the hook runs while the plan is announced.
+  ctx.report = undefined
+  const bullet = ui.bullet.bind(ui)
+  ui.bullet = (line: string) => {
+    bullet(line)
+    if (/Register opencode-spotify/i.test(line)) ctx.cancel.request("sigint")
+  }
+
+  assert.equal(await runSetup(ctx), 2, ui.lines.join("\n"))
+  assert.ok(ctx.cancel.requested)
+})
+
+test("repair maps a cancelled bridge result to 130, not a generic failure", async () => {
+  const runtime = freshInstallRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "repair", yes: true })
+  ctx.detection = fakeDetection(runtime)
+  const realRun = runtime.run.bind(runtime)
+  runtime.run = (async (file: string, args: string[], options?: unknown) => {
+    if (file.includes("pwsh")) {
+      return { code: 130, stdout: "", stderr: "", cancelled: true as const, error: "Cancelled by the user." }
+    }
+    return realRun(file, args, options as never)
+  }) as typeof runtime.run
+
+  assert.equal(await runRepair(ctx), 130, ui.lines.join("\n"))
+  assert.equal(ctx.cancel.phase, "cancelled")
+  const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
+  assert.ok(!commands.some((command) => command.includes("spicetify apply")), "no apply after a cancelled bridge step")
+})
+
+test("a cancelled repair reports completed and skipped steps honestly", async () => {
+  const runtime = freshInstallRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "repair", yes: true })
+  ctx.detection = fakeDetection(runtime)
+  overridePluginAdd(runtime, { code: 0, after: () => ctx.cancel.request("sigint") })
+
+  assert.equal(await runRepair(ctx), 130, ui.lines.join("\n"))
+  const text = ui.lines.join("\n")
+  assert.match(text, /Completed steps: register-global-plugin/)
+  assert.match(text, /Not run: repair-bridge/)
+  assert.ok(!/Bridge: repaired and applied/i.test(text), text)
 })

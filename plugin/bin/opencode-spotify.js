@@ -14,7 +14,11 @@ if (!existsSync(fileURLToPath(compiled))) {
   main(process.argv.slice(2))
     .then((code) => { process.exitCode = code })
     .catch((error) => {
-      const message = error instanceof Error ? error.message : "Installer failed"
+      const raw = error instanceof Error ? error.message : "Installer failed"
+      const message = raw
+        .replace(/\b[a-f0-9]{32,}\b/gi, "[redacted]")
+        .replace(/\b(secret|token|password|credential|authorization)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+        .slice(0, 400)
       process.stderr.write(`Error: ${message}\n`)
       process.exitCode = 1
     })

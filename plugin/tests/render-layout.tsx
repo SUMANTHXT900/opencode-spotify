@@ -15,7 +15,8 @@ import type { MusicProps } from "../src/components/Music.tsx"
 import type { Context, KeymapLayer } from "@opencode/plugin/tui/context"
 import { lyricColors, contrast, graphicsCapabilities } from "../src/ui/colors.ts"
 import { playerBudget, playerLayout } from "../src/ui/player-layout.ts"
-import { writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
+import { dirname } from "node:path"
 import { lyricsSettingsDialog } from "../src/components/LyricsSettings.ts"
 import { musicActions } from "../src/components/Music.tsx"
 import type { LyricsSettings } from "../src/services/lyrics-source.ts"
@@ -1569,5 +1570,5 @@ for (const base of ["#eeeeee", "#202020"]) {
   for (const color of [colors.text, colors.muted]) assert.ok(contrast(color, colors.background) >= 4.5)
 }
 assert.equal(graphicsCapabilities(null).imageProtocol, "blocks")
-if (process.env.SPOTIFY_CAPTURE_FRAMES === "1") writeFileSync("../docs/V0.5.5_RENDER_SNAPSHOTS.txt", snapshots.join("\n\n"))
+if (process.env.SPOTIFY_CAPTURE_FRAMES === "1") { const target = "../.cache/spotify-capture-frames.txt"; mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, snapshots.join("\n\n")) }
 console.log("native player/lyrics rendering, bounds, resize, mouse and command handlers passed")

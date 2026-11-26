@@ -1,0 +1,11 @@
+OpenCode Spotify           v0.6.0-beta.3
+
+| Setup plan
+| 4 steps, dry run
+
+  1 Install plugin           * ready
+  2 Register bridge          * ready
+  3 Check credential         ! review
+  4 Restart OpenCode         o pending
+
+  nothing was written

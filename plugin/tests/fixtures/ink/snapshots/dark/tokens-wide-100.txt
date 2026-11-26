@@ -1,0 +1,17 @@
+OpenCode Spotify                                                                       v0.6.0-beta.3
+
+│ Dark theme tokens
+│ contrast vs assumed bg #0E1116 (never painted)
+
+  background terminal default, never painted
+  accent     #1DB954  7.31:1
+  selected   #1ED760  9.86:1
+  text       #E6EDF3  16.00:1
+  muted      #9AA4AE  7.47:1
+  ok         #1DB954  7.31:1
+  warn       #E3B341  9.72:1
+  error      #F85149  5.64:1
+  pending    #8B949E  6.15:1
+  rule       #30363D  1.55:1  decorative
+
+  only the accent is chromatic; chrome stays neutral

@@ -13,18 +13,30 @@
 import { addGlobalPlugin, isPathLikeSource, projectPlugins, removeGlobalPlugin } from "./opencode.ts"
 import { installSpicetify, upgradeSpicetify } from "./spicetify.ts"
 import { applyBridge, bridgeOperation, removeCredentials } from "./bridge.ts"
+import { isCancellation, OperationCancelled } from "./cancel.ts"
+import type { CancelToken } from "./cancel.ts"
 import { detectEnvironment } from "./detect.ts"
 import { githubLatest, npmLatest } from "./versions.ts"
+import {
+  PLAN_MESSAGES,
+  sanitizeMessage,
+} from "./state.ts"
 import type {
   CommandResult,
   Detection,
   Logger,
+  LogLevel,
   OperationContext,
   PlanStep,
+  ProgressEvent,
+  ProgressReporter,
   Runtime,
   SpicetifyInfo,
   VersionInfo,
 } from "./types.ts"
+
+// Re-exported for existing callers (setup.ts imports sanitizeMessage from here).
+export { sanitizeMessage }
 
 export interface ProjectPluginEntry {
   id: string
@@ -60,7 +72,10 @@ export interface WorkflowDeps {
   installSpicetify(runtime: Runtime, info: SpicetifyInfo, options: SpicetifyInstallActionOptions): Promise<CommandResult>
   upgradeSpicetify(runtime: Runtime, info: SpicetifyInfo, options: SpicetifyUpgradeActionOptions): Promise<CommandResult>
   bridgeOperation(runtime: Runtime, operation: "install" | "repair" | "uninstall", options: BridgeActionOptions): Promise<CommandResult>
-  applyBridge(runtime: Runtime, options: { spicetifyPath: string | null }): Promise<CommandResult>
+  applyBridge(
+    runtime: Runtime,
+    options: { spicetifyPath: string | null; onProgress?: (line: string) => void },
+  ): Promise<CommandResult>
   removeCredentials(runtime: Runtime): Promise<CommandResult>
 }
 
@@ -89,8 +104,19 @@ export const defaultWorkflowDeps: WorkflowDeps = {
   removeCredentials: (runtime) => removeCredentials(runtime),
 }
 
-export function resolveWorkflowDeps(overrides: Partial<WorkflowDeps> = {}): WorkflowDeps {
-  return { ...defaultWorkflowDeps, ...overrides }
+export function resolveWorkflowDeps(
+  overrides: Partial<WorkflowDeps> = {},
+  ctx?: OperationContext,
+): WorkflowDeps {
+  const deps = { ...defaultWorkflowDeps, ...overrides }
+  if (!ctx) return deps
+  // Forward opencode child stdout/stderr as debug log events (or the legacy
+  // two-space Ui lines when no reporter is attached).
+  return {
+    ...deps,
+    addGlobalPlugin: async (runtime, spec) => reportChildOutput(ctx, await deps.addGlobalPlugin(runtime, spec)),
+    removeGlobalPlugin: async (runtime, spec) => reportChildOutput(ctx, await deps.removeGlobalPlugin(runtime, spec)),
+  }
 }
 
 /**
@@ -159,13 +185,6 @@ export function assertActionResult(result: CommandResult | unknown, message: str
   throw new Error(detail ? `${message} ${detail}` : message)
 }
 
-export function sanitizeMessage(message: string): string {
-  return message
-    .replace(/\b[a-f0-9]{32,}\b/gi, "[redacted]")
-    .replace(/\b(secret|token|password|credential|authorization)\s*[:=]\s*\S+/gi, "$1=[redacted]")
-    .slice(0, 240)
-}
-
 function describeFailure(error: unknown): string {
   if (error instanceof Error && error.message) return sanitizeMessage(error.message)
   return "The step failed."
@@ -181,6 +200,10 @@ export interface PlanOutcome {
   skipped: string[]
   failed?: string
   error?: string
+  /** Cancellation was requested and at least one step was allowed to finish. */
+  partial?: boolean
+  /** Cancellation stopped the run (before a step or between steps). */
+  interrupted?: boolean
 }
 
 export interface PlanConfirmation {
@@ -193,6 +216,172 @@ export interface PlanConfirmation {
   phrase?: string
 }
 
+export type PlanEventReporter = ProgressReporter
+
+/**
+ * The master-owned reporter, guarded for the fixture-migration window: a
+ * partial fake may provide only `progress`, which must not be treated as a
+ * full plan renderer. When the plan methods are absent, executePlan keeps the
+ * legacy Ui path.
+ */
+export function planReporter(ctx: OperationContext): ProgressReporter | undefined {
+  const report = ctx.report
+  if (!report) return undefined
+  return typeof report.emit === "function" &&
+    typeof report.step === "function" &&
+    typeof report.log === "function"
+    ? report
+    : undefined
+}
+
+function emitEvent(report: ProgressReporter, event: ProgressEvent): void {
+  try {
+    report.emit(event)
+  } catch {
+    // A broken UI/store must not abort a mutating plan.
+  }
+}
+
+function emitStep(
+  report: ProgressReporter,
+  ctx: OperationContext,
+  step: Pick<PlanStep, "id" | "description">,
+  status: "pending" | "running" | "ok" | "failed" | "skipped",
+  detail?: string,
+): void {
+  emitEvent(report, {
+    type: "step",
+    id: step.id,
+    status,
+    description: sanitizeMessage(step.description),
+    ...(detail === undefined ? {} : { detail: sanitizeMessage(detail) }),
+    at: ctx.runtime.now(),
+  })
+}
+
+/** Cancellation lifecycle event (requested -> finishing -> settled). */
+function emitCancel(
+  report: ProgressReporter,
+  ctx: OperationContext,
+  phase: "requested" | "finishing" | "settled",
+  stepId?: string,
+): void {
+  emitEvent(report, {
+    type: "cancel",
+    phase,
+    ...(stepId ? { stepId } : {}),
+    ...(ctx.cancel.forced ? { forced: true } : {}),
+    at: ctx.runtime.now(),
+  })
+}
+
+/**
+ * Announce a plan exactly once before consent. With a structured reporter the
+ * plan becomes a `plan` event carrying the real step descriptions (so presenters
+ * never have to invent id-only rows); in the legacy path it renders through Ui.
+ */
+export function announcePlan(
+  ctx: OperationContext,
+  title: string,
+  steps: PlanStep[],
+  options: { render?: boolean } = {},
+): void {
+  const report = planReporter(ctx)
+  if (report) {
+    emitEvent(report, {
+      type: "plan",
+      title: sanitizeMessage(title),
+      steps: steps.map((step) => ({
+        id: step.id,
+        description: sanitizeMessage(step.description),
+        mutates: step.mutates,
+        status: "pending" as const,
+      })),
+      at: ctx.runtime.now(),
+    })
+    return
+  }
+  if (options.render !== false) showPlan(ctx, title, steps)
+}
+
+function emitLog(report: ProgressReporter, level: LogLevel, message: string): void {
+  try {
+    report.log(level, message)
+  } catch {
+    // Presentation failures are non-fatal.
+  }
+}
+
+function emitResult(ctx: OperationContext, report: ProgressReporter, outcome: PlanOutcome): void {
+  emitEvent(report, { type: "result", code: planExitCode(outcome), at: ctx.runtime.now() })
+}
+
+/**
+ * Forward a child-process progress line. With a full reporter this becomes a
+ * `progress` event (bridge apply => scope "apply"); without one the legacy
+ * two-space UI line is preserved exactly.
+ *
+ * B06: ApplyBridgeOptions.onProgress is wired through here.
+ */
+export function reportProgress(
+  ctx: OperationContext,
+  scope: string,
+  line: string,
+  percent?: number,
+): void {
+  const report = ctx.report
+  if (report && typeof report.progress === "function") {
+    try {
+      report.progress(scope, sanitizeMessage(line), percent)
+    } catch {
+      // Presentation failures are non-fatal.
+    }
+    return
+  }
+  ctx.ui.line(`  ${line}`)
+}
+
+/**
+ * Forward a diagnostic line. Opencode child output uses level "debug", which
+ * the plain reporter only prints in verbose mode. Without a reporter the
+ * legacy Ui destination for that level is used, so existing output is stable.
+ */
+export function reportLog(ctx: OperationContext, level: LogLevel, message: string): void {
+  const report = ctx.report
+  if (report && typeof report.log === "function") {
+    try {
+      report.log(level, sanitizeMessage(message))
+    } catch {
+      // Presentation failures are non-fatal.
+    }
+    return
+  }
+  switch (level) {
+    case "debug": ctx.ui.line(`  ${message}`); break
+    case "info": ctx.ui.line(message); break
+    case "success": ctx.ui.success(message); break
+    case "warn": ctx.ui.warn(message); break
+    case "error": ctx.ui.error(message); break
+  }
+}
+
+const CHILD_OUTPUT_LINE_LIMIT = 20
+
+/**
+ * Forward child stdout/stderr as debug log events (bounded), and return the
+ * result unchanged so callers can compose it inline. Without a reporter this
+ * mirrors the legacy `ui.line("  <line>")` rendering.
+ */
+export function reportChildOutput(ctx: OperationContext, result: CommandResult): CommandResult {
+  const lines = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(0, CHILD_OUTPUT_LINE_LIMIT)
+  for (const line of lines) reportLog(ctx, "debug", line)
+  return result
+}
+
 function showPlan(ctx: OperationContext, title: string, steps: PlanStep[]): void {
   ctx.ui.section(title)
   steps.forEach((step, index) => {
@@ -201,9 +390,248 @@ function showPlan(ctx: OperationContext, title: string, steps: PlanStep[]): void
 }
 
 /**
+ * Cancellation wording for a run that was interrupted. A full cancellation
+ * reuses the shared PLAN_MESSAGES text; a partial run states what happened.
+ */
+const PARTIAL_CANCEL_MESSAGE =
+  "Cancelled. The in-flight step was allowed to finish; remaining steps were not run."
+
+/**
+ * Runtime view whose child processes inherit the operation's cancel token.
+ * The real Runtime already falls back to its own token, but dependency seams
+ * and fakes only see what is passed explicitly, so mutations pass this view.
+ */
+export function cancelAwareRuntime(runtime: Runtime, cancel?: CancelToken): Runtime {
+  if (!cancel) return runtime
+  const wrapped: Runtime = {
+    ...runtime,
+    run: (file, args, options) => runtime.run(file, args, { ...options, cancel: options?.cancel ?? cancel }),
+  }
+  if (runtime.runInteractive) {
+    const runInteractive = runtime.runInteractive.bind(runtime)
+    wrapped.runInteractive = (file, args, options) =>
+      runInteractive(file, args, { ...options, cancel: options?.cancel ?? cancel })
+  }
+  return wrapped
+}
+
+/**
+ * Shared presentation for plans that will not run a step: dry-run, a declined
+ * consent, or a missing noninteractive confirmation. Emits one skipped step
+ * event per step plus the stable shared wording (or the legacy Ui lines).
+ */
+export function planSkipOutcome(
+  ctx: OperationContext,
+  steps: PlanStep[],
+  status: Extract<PlanStatus, "dry-run" | "cancelled" | "confirmation-required">,
+): PlanOutcome {
+  const report = planReporter(ctx)
+  const outcome: PlanOutcome = {
+    status,
+    completed: [],
+    skipped: steps.map((step) => step.id),
+  }
+  if (report) {
+    for (const step of steps) {
+      if (status === "dry-run") emitStep(report, ctx, step, "skipped", "dry-run")
+      else emitStep(report, ctx, step, "skipped")
+    }
+    if (status === "dry-run") emitLog(report, "info", PLAN_MESSAGES.dryRun)
+    else if (status === "cancelled") emitLog(report, "warn", PLAN_MESSAGES.cancelled)
+    else emitLog(report, "error", PLAN_MESSAGES.confirmationRequired)
+    emitResult(ctx, report, outcome)
+  } else if (status === "dry-run") {
+    for (const step of steps) ctx.ui.dryRun(step.description)
+    ctx.ui.line(PLAN_MESSAGES.dryRun)
+  } else if (status === "cancelled") {
+    ctx.ui.warn(PLAN_MESSAGES.cancelled)
+  } else {
+    ctx.ui.error(PLAN_MESSAGES.confirmationRequired)
+  }
+  return outcome
+}
+
+export interface RunPlanHooks {
+  /** Title for the `plan` event when the runner announces the plan. */
+  title?: string
+  /** Emit the plan event before the first step (default true). */
+  announce?: boolean
+}
+
+/**
+ * Run plan steps with cancellation semantics shared by every workflow:
+ *
+ *   * a cancellation request before a step starts skips the remaining steps and
+ *     settles with exit code 130 (no further step runs, not even a protected one);
+ *   * a `protected` step always finishes once started, then the run stops with
+ *     `partial: true` and 130;
+ *   * an `abort`/`boundary` step that throws OperationCancelled is a cancelled
+ *     step (130), never a failure;
+ *   * a real failure always wins over a concurrent cancellation (exit code 1).
+ *
+ * The plan event (with real descriptions) is emitted before the first step
+ * unless the caller already announced it via `announcePlan`.
+ */
+export async function runPlanSteps(
+  steps: PlanStep[],
+  ctx: OperationContext,
+  hooks: RunPlanHooks = {},
+): Promise<PlanOutcome> {
+  const report = planReporter(ctx)
+  const cancel = ctx.cancel
+  const { ui } = ctx
+  const completed: string[] = []
+
+  if (hooks.announce !== false) announcePlan(ctx, hooks.title ?? "Plan", steps)
+
+  let requestedEmitted = false
+  let finishingEmitted = false
+  let runningStep: PlanStep | undefined
+
+  const announceRequested = (): void => {
+    if (requestedEmitted) return
+    requestedEmitted = true
+    if (report) emitCancel(report, ctx, "requested", runningStep?.id ?? cancel.stepId)
+  }
+  const announceFinishing = (stepId: string): void => {
+    if (finishingEmitted) return
+    finishingEmitted = true
+    if (report) emitCancel(report, ctx, "finishing", stepId)
+  }
+
+  const unsubscribe = cancel.onRequest(() => {
+    announceRequested()
+    if (runningStep?.interrupt === "protected") {
+      cancel.beginFinishing(runningStep.id)
+      announceFinishing(runningStep.id)
+    }
+  })
+
+  const stop = (remaining: PlanStep[], options: { partial: boolean }): PlanOutcome => {
+    if (!cancel.requested) cancel.request("user")
+    if (options.partial) cancel.settle("partial")
+    else cancel.settle("cancelled")
+    announceRequested()
+    if (options.partial) announceFinishing(cancel.stepId ?? runningStep?.id ?? "current")
+    const outcome: PlanOutcome = {
+      status: "cancelled",
+      completed: [...completed],
+      skipped: remaining.map((step) => step.id),
+      ...(options.partial ? { partial: true } : {}),
+      interrupted: true,
+    }
+    const message = options.partial
+      ? PARTIAL_CANCEL_MESSAGE
+      : completed.length > 0
+        ? "Cancelled. Completed steps were kept; remaining steps were not run."
+        : PLAN_MESSAGES.cancelled
+    if (report) {
+      for (const step of remaining) emitStep(report, ctx, step, "skipped", "cancelled")
+      emitLog(report, "warn", message)
+      emitCancel(report, ctx, "settled", cancel.stepId)
+      emitResult(ctx, report, outcome)
+    } else {
+      ui.warn(message)
+    }
+    return outcome
+  }
+
+  try {
+    for (let index = 0; index < steps.length; index++) {
+      const step = steps[index]!
+
+      // Cancellation between steps: no further step starts.
+      if (cancel.requested) return stop(steps.slice(index), { partial: false })
+
+      // Revalidate the installer lock before every mutating step: a lock lost
+      // mid-run must stop the operation, not mutate alongside another installer.
+      if (step.mutates && ctx.guard) {
+        try {
+          await ctx.guard()
+        } catch (error) {
+          const message = describeFailure(error)
+          return {
+            status: "failed",
+            completed: [...completed],
+            skipped: steps.slice(index).map((item) => item.id),
+            failed: step.id,
+            error: message,
+          }
+        }
+      }
+
+      if (report) emitStep(report, ctx, step, "running")
+      runningStep = step
+      // Protected steps keep their children alive: the token still records the
+      // request, but runtime kills are suppressed until the step completes.
+      const releaseKill = step.interrupt === "protected" ? cancel.holdKill() : undefined
+      try {
+        await step.run()
+      } catch (error) {
+        runningStep = undefined
+        if (isCancellation(error)) {
+          // A cooperative abort is a cancelled step, not a failed one.
+          if (!cancel.requested) cancel.request("user")
+          if (report) emitStep(report, ctx, step, "skipped", "cancelled")
+          return stop(steps.slice(index + 1), { partial: false })
+        }
+        // A real failure wins over a concurrent cancellation: exit code 1.
+        const message = describeFailure(error)
+        const skipped = steps.slice(index + 1).map((item) => item.id)
+        const outcome: PlanOutcome = {
+          status: "failed",
+          completed: [...completed],
+          skipped,
+          failed: step.id,
+          error: message,
+        }
+        if (report) {
+          emitStep(report, ctx, step, "failed", message)
+          for (const item of steps.slice(index + 1)) emitStep(report, ctx, item, "skipped")
+          emitResult(ctx, report, outcome)
+        } else {
+          ui.error(`Stopped at: ${step.id} - ${step.description}`)
+          ui.line(`   Reason: ${message}`)
+          ui.line(`   Completed stages: ${completed.length ? completed.join(", ") : "none"}`)
+          ui.line(`   Not run: ${skipped.length ? skipped.join(", ") : "none"}`)
+        }
+        return outcome
+      } finally {
+        releaseKill?.()
+      }
+      runningStep = undefined
+      completed.push(step.id)
+      if (report) emitStep(report, ctx, step, "ok")
+      else ui.success(step.description)
+
+      if (cancel.requested) {
+        // Protected steps always run to completion; boundary/abort stop here.
+        return stop(steps.slice(index + 1), { partial: step.interrupt === "protected" })
+      }
+    }
+  } finally {
+    unsubscribe()
+  }
+
+  const outcome: PlanOutcome = { status: "completed", completed, skipped: [] }
+  if (report) {
+    emitLog(report, "success", PLAN_MESSAGES.completed)
+    emitResult(ctx, report, outcome)
+  } else {
+    ui.status("ok", PLAN_MESSAGES.completed)
+  }
+  return outcome
+}
+
+/**
  * Present and execute a plan. Read-only plans do not prompt. Mutating plans
  * require --yes or an explicit confirmation; cancellation and missing consent
  * run nothing and return a non-completed status.
+ *
+ * When a full `ctx.report` is present, plan output is delivered as
+ * ProgressEvents instead of direct Ui writes, so a store/presentation can
+ * render it (or createPlainReporter can reproduce the console text). Without
+ * one, the legacy Ui path is byte-identical to V0.6.0 beta.
  */
 export async function executePlan(
   ctx: OperationContext,
@@ -212,60 +640,66 @@ export async function executePlan(
   confirmation: PlanConfirmation = {},
 ): Promise<PlanOutcome> {
   const { options, prompt, ui } = ctx
-  showPlan(ctx, title, steps)
-  if (steps.length === 0) {
-    ui.status("info", "Nothing to do.")
-    return { status: "completed", completed: [], skipped: [] }
+  const report = planReporter(ctx)
+  const ids = steps.map((step) => step.id)
+
+  // Cancelled before anything is shown or run.
+  let cancelledBeforeStart = false
+  try {
+    ctx.cancel.throwIfCancelled()
+  } catch {
+    cancelledBeforeStart = true
+  }
+  if (cancelledBeforeStart) {
+    ctx.cancel.settle("cancelled")
+    const outcome: PlanOutcome = { status: "cancelled", completed: [], skipped: ids, interrupted: true }
+    if (report) {
+      emitCancel(report, ctx, "requested")
+      emitLog(report, "warn", PLAN_MESSAGES.cancelled)
+      emitCancel(report, ctx, "settled")
+      emitResult(ctx, report, outcome)
+    } else {
+      ui.warn(PLAN_MESSAGES.cancelled)
+    }
+    return outcome
   }
 
-  if (options.dryRun) {
-    for (const step of steps) ui.dryRun(step.description)
-    ui.line("  Dry run: no changes were made.")
-    return { status: "dry-run", completed: [], skipped: steps.map((step) => step.id) }
+  announcePlan(ctx, title, steps)
+
+  if (steps.length === 0) {
+    const outcome: PlanOutcome = { status: "completed", completed: [], skipped: [] }
+    if (report) {
+      emitLog(report, "info", PLAN_MESSAGES.nothingToDo)
+      emitResult(ctx, report, outcome)
+    } else {
+      ui.status("info", PLAN_MESSAGES.nothingToDo)
+    }
+    return outcome
   }
+
+  if (options.dryRun) return planSkipOutcome(ctx, steps, "dry-run")
 
   const mutates = steps.some((step) => step.mutates)
   const needsPrompt = mutates && !confirmation.approved && (confirmation.force || !options.yes)
   if (needsPrompt) {
-    if (options.nonInteractive) {
-      ui.error("Confirmation required in noninteractive mode; no changes were made.")
-      return { status: "confirmation-required", completed: [], skipped: steps.map((step) => step.id) }
-    }
+    if (options.nonInteractive) return planSkipOutcome(ctx, steps, "confirmation-required")
     const approved = await prompt.confirm(confirmation.question ?? "Apply this plan?", {
       defaultYes: confirmation.defaultYes === true,
       ...(confirmation.phrase ? { phrase: confirmation.phrase } : {}),
     })
-    if (!approved) {
-      ui.warn("Cancelled. No steps in this plan were run. Earlier completed operations (for example a separately approved Spicetify install or upgrade) are unaffected and are not rolled back.")
-      return { status: "cancelled", completed: [], skipped: steps.map((step) => step.id) }
+    if (!approved) return planSkipOutcome(ctx, steps, "cancelled")
+    // Consent may have been accompanied by a cancellation request (Ctrl-C).
+    // The runner then starts no step and settles with 130.
+    let cancelledAfterConsent = false
+    try {
+      ctx.cancel.throwIfCancelled()
+    } catch {
+      cancelledAfterConsent = true
     }
+    if (cancelledAfterConsent) return runPlanSteps(steps, ctx, { announce: false })
   }
 
-  const completed: string[] = []
-  for (let index = 0; index < steps.length; index++) {
-    const step = steps[index]!
-    try {
-      await step.run()
-      completed.push(step.id)
-      ui.success(step.description)
-    } catch (error) {
-      const message = describeFailure(error)
-      const skipped = steps.slice(index + 1).map((item) => item.id)
-      ui.error(`Stopped at: ${step.id} - ${step.description}`)
-      ui.line(`   Reason: ${message}`)
-      ui.line(`   Completed stages: ${completed.length ? completed.join(", ") : "none"}`)
-      ui.line(`   Not run: ${skipped.length ? skipped.join(", ") : "none"}`)
-      return {
-        status: "failed",
-        completed,
-        skipped,
-        failed: step.id,
-        error: message,
-      }
-    }
-  }
-  ui.status("ok", "Plan completed.")
-  return { status: "completed", completed, skipped: [] }
+  return runPlanSteps(steps, ctx, { title, announce: false })
 }
 
 export interface ApplyOutcome {
@@ -309,8 +743,16 @@ export async function maybeApplyBridge(
     id: "apply-spicetify",
     description: "Run spicetify apply to activate the prepared bridge (may restart Spotify)",
     mutates: true,
+    // Once apply starts, finish and verify it before honouring cancellation.
+    interrupt: "protected",
     run: async () => {
-      const result = await applyBridge(ctx.runtime, { spicetifyPath })
+      const result = await applyBridge(cancelAwareRuntime(ctx.runtime, ctx.cancel), {
+        spicetifyPath,
+        onProgress: (line) => reportProgress(ctx, "apply", line),
+      })
+      if (result.cancelled === true || result.code === 130) {
+        throw new OperationCancelled("apply-spicetify", result.error ?? "spicetify apply was cancelled")
+      }
       if (result.code !== 0) throw new Error(result.error ?? "spicetify apply failed")
     },
   }])
@@ -343,6 +785,7 @@ export async function applyPlanIfRequested(
     }
     const outcome = await executePlan(ctx, "Apply Spicetify changes", steps)
     if (outcome.status === "completed") return { code: 0, applied: true, pending: false }
+    if (outcome.status === "cancelled") return cancelledApply(ctx, outcome)
     ui.warn("Apply pending. The bridge is prepared but Spicetify has not been applied.")
     return { code: 1, applied: false, pending: true }
   }
@@ -357,10 +800,25 @@ export async function applyPlanIfRequested(
     question: "Apply Spicetify changes now?",
   })
   if (outcome.status === "completed") return { code: 0, applied: true, pending: false }
-  if (outcome.status === "cancelled") {
-    ui.warn("Apply pending. The bridge is prepared; run spicetify apply when ready.")
-    return { code: 0, applied: false, pending: true }
-  }
+  if (outcome.status === "cancelled") return cancelledApply(ctx, outcome)
   ui.warn("Apply pending. The bridge is prepared but Spicetify has not been applied.")
   return { code: 1, applied: false, pending: true }
+}
+
+/**
+ * A cancelled apply must never become a failure: a protected apply that already
+ * finished is reported as applied, and an interrupted-before-start apply keeps
+ * the pending warning while surfacing 130 (never 1) to the caller.
+ */
+function cancelledApply(ctx: OperationContext, outcome: PlanOutcome): ApplyOutcome {
+  if (!ctx.cancel.requested) {
+    // Consent was declined (not a cancellation): the bridge stays pending.
+    ctx.ui.warn("Apply pending. The bridge is prepared; run spicetify apply when ready.")
+    return { code: 0, applied: false, pending: true }
+  }
+  if (outcome.partial) {
+    return { code: 130, applied: true, pending: false }
+  }
+  ctx.ui.warn("Apply pending. The bridge is prepared; run spicetify apply when ready.")
+  return { code: 130, applied: false, pending: true }
 }

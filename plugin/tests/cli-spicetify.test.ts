@@ -4,17 +4,23 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { existsSync, statSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import type { CommandResult, Runtime } from "../src/cli/types.ts";
+import type { CommandResult, Runtime, SpicetifyInfo } from "../src/cli/types.ts";
 import {
   inspectSpicetify,
   inspectSpotify,
   installSpicetify,
   upgradeSpicetify,
   applySpicetify,
+  backupSpicetify,
+  restoreSpotifyFromBackup,
+  spicetifyManualDetails,
+  upgradeSpicetifyWithManager,
   SPOTIFY_STORE_QUERY,
   SPICETIFY_MANUAL_URL,
+  SPICETIFY_RELEASES_PAGE,
   SPICETIFY_WINGET_ID,
 } from "../src/cli/spicetify.ts";
+import { createCancelToken } from "../src/cli/cancel.ts";
 
 interface FakeOptions {
   env?: Record<string, string>;
@@ -276,12 +282,12 @@ test("detects Store Spotify via fixed pwsh command", async () => {
   }
 });
 
-test("winget install requires approval and dry-run plans without executing", async () => {
-  const root = await tempRoot("spicetify-winget-");
+test("official installer requires approval and dry-run plans without executing", async () => {
+  const root = await tempRoot("spicetify-official-");
   try {
     const runtime = createFakeRuntime(root, {
       env: {},
-      which: { winget: "C:\\winget.exe" },
+      which: {},
       run: () => ({ code: 0, stdout: "ok", stderr: "" }),
     });
     const info = { available: false } as never;
@@ -295,85 +301,49 @@ test("winget install requires approval and dry-run plans without executing", asy
     assert.match(dry.stdout, /Would run/);
     assert.equal(runtime.calls.length, 0);
 
-    let approvedDetails: { method: string; command: string; source: string } | null = null as { method: string; command: string; source: string } | null;
-    const approvedRuntime = createFakeRuntime(root, {
+    const offlineRuntime = createFakeRuntime(root, {
       env: {},
-      which: { winget: "C:\\winget.exe", spicetify: undefined },
-      run: (file, args) => {
-        assert.equal(file, "C:\\winget.exe");
-        assert.deepEqual(args, [
-          "install",
-          "--id",
-          "Spicetify.Spicetify",
-          "-e",
-          "--source",
-          "winget",
-          "--accept-package-agreements",
-          "--accept-source-agreements",
-        ]);
-        return { code: 0, stdout: "installed", stderr: "" };
-      },
-    });
-    const approved = await installSpicetify(approvedRuntime, info, {
-      dryRun: false,
-      approve: async (details) => {
-        approvedDetails = details;
-        return true;
-      },
-    });
-    assert.equal(approved.code, 0);
-    assert.equal(approvedDetails?.method, "winget");
-    assert.match(approvedDetails?.command ?? "", /winget install/);
-
-    const refusedRuntime = createFakeRuntime(root, {
-      env: {},
-      which: { winget: "C:\\winget.exe" },
+      which: {},
       run: () => {
-        throw new Error("must not execute without approval");
+        throw new Error("offline must not execute any child process");
       },
     });
-    const refused = await installSpicetify(refusedRuntime, info, {
+    const offline = await installSpicetify(offlineRuntime, { available: false } as never, {
       dryRun: false,
-      approve: async () => false,
+      offline: true,
+      approve: async () => {
+        throw new Error("offline must not ask for approval");
+      },
     });
-    assert.equal(refused.code, 1);
-    assert.equal(refusedRuntime.calls.length, 0);
+    assert.equal(offline.code, 1);
+    assert.match(offline.error ?? "", /offline|manual/i);
+    assert.equal(offlineRuntime.calls.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("without winget, automatic install refuses and directs to manual instructions", async () => {
+test("existing installs are never overlaid by a fresh install", async () => {
   const root = await tempRoot("spicetify-manual-");
   try {
     const runtime = createFakeRuntime(root, {
       env: {},
       which: {},
       run: () => {
-        throw new Error("must not execute any child process without winget");
+        throw new Error("must not execute any child process when an install exists");
       },
     });
     assert.equal(SPICETIFY_WINGET_ID, "Spicetify.Spicetify");
-    const dry = await installSpicetify(runtime, { available: false } as never, {
-      dryRun: true,
-      approve: async () => {
-        throw new Error("dry-run must not ask for approval");
-      },
-    });
-    assert.equal(dry.code, 1);
-    assert.match(dry.error ?? "", /winget/i);
-    assert.match(dry.error ?? "", /manually/i);
-    assert.equal(runtime.calls.length, 0);
-
-    const result = await installSpicetify(runtime, { available: false } as never, {
-      dryRun: false,
-      approve: async () => {
-        throw new Error("must not ask for approval without winget");
-      },
-    });
-    assert.equal(result.code, 1);
-    assert.match(result.error ?? "", /winget/i);
-    assert.match(result.error ?? "", new RegExp(SPICETIFY_MANUAL_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 20)));
+    for (const owner of ["winget", "scoop", "choco", "script", "unknown"] as const) {
+      const result = await installSpicetify(runtime, { available: true, owner } as never, {
+        dryRun: false,
+        approve: async () => {
+          throw new Error("must not ask for approval when an install exists");
+        },
+      });
+      assert.equal(result.code, 1);
+      assert.match(result.error ?? "", /already installed|overlay|manager|manual|unknown/i);
+    }
     assert.equal(runtime.calls.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -396,8 +366,10 @@ test("upgrade uses owner commands with approval and refuses unknown", async () =
       { ...base, path: "C:\\spicetify.exe", owner: "script" },
       { dryRun: false, approve: async () => true },
     );
-    assert.equal(scriptResult.code, 1); // no mocked run handler
-    assert.deepEqual(scriptRuntime.calls[0], { file: "C:\\spicetify.exe", args: ["upgrade"] });
+    // Script-owned copies never use the unverified `spicetify upgrade`
+    // self-updater; they use the pinned official installer flow.
+    assert.ok(!scriptRuntime.calls.some((call) => call.file === "C:\\spicetify.exe" && call.args[0] === "upgrade"),
+      "script-owned upgrade must not invoke spicetify.exe upgrade");
 
     const wingetRuntime = createFakeRuntime(root, {
       env: {},
@@ -426,7 +398,7 @@ test("upgrade uses owner commands with approval and refuses unknown", async () =
       run: () => ({ code: 0, stdout: "", stderr: "" }),
     });
     await upgradeSpicetify(scoopRuntime, { ...base, path: "C:\\sp.exe", owner: "scoop" }, { approve: async () => true });
-    assert.deepEqual(scoopRuntime.calls[0]?.args, ["update", "spicetify"]);
+    assert.deepEqual(scoopRuntime.calls[0]?.args, ["update", "spicetify-cli"]);
 
     const chocoRuntime = createFakeRuntime(root, {
       env: {},
@@ -434,7 +406,7 @@ test("upgrade uses owner commands with approval and refuses unknown", async () =
       run: () => ({ code: 0, stdout: "", stderr: "" }),
     });
     await upgradeSpicetify(chocoRuntime, { ...base, path: "C:\\sp.exe", owner: "choco" }, { approve: async () => true });
-    assert.deepEqual(chocoRuntime.calls[0]?.args, ["upgrade", "spicetify", "-y"]);
+    assert.deepEqual(chocoRuntime.calls[0]?.args, ["upgrade", "spicetify-cli", "-y"]);
 
     const unknownRuntime = createFakeRuntime(root, {
       env: {},
@@ -497,6 +469,154 @@ test("applySpicetify only runs after approval", async () => {
     const ok = await applySpicetify(withHandler, "C:\\sp.exe", true);
     assert.equal(ok.code, 0);
     void explicitRuntime;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// B26/B28: dynamic manual targets and cancellation boundaries
+// ---------------------------------------------------------------------------
+
+test("manual details are dynamic and never invent a target version", () => {
+  const none = spicetifyManualDetails();
+  assert.match(none, new RegExp(SPICETIFY_RELEASES_PAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(none, /Target version: v\d/);
+  assert.ok(!none.includes("2.46.7"), "retired hardcoded target must not leak");
+  assert.match(none, /Marketplace step .*removed from the staged script/i);
+
+  const resolved = spicetifyManualDetails({ version: "2.49.3" }, "x64");
+  assert.match(resolved, /Target version: v2\.49\.3/);
+  assert.match(resolved, /spicetify-2\.49\.3-windows-x64\.zip/);
+  assert.match(resolved, /Asset URL: https:\/\/github\.com\/spicetify\/cli\/releases\/download\/v2\.49\.3\//);
+
+  const custom = spicetifyManualDetails(
+    {
+      tagName: "v2.49.3",
+      assetName: "custom-win.zip",
+      assetUrl: "https://github.com/spicetify/cli/releases/download/v2.49.3/custom-win.zip",
+      digest: "sha256:abc",
+    },
+    "arm64",
+  );
+  assert.match(custom, /Target version: v2\.49\.3/);
+  assert.match(custom, /custom-win\.zip/);
+  assert.match(custom, /Expected digest: sha256:abc/);
+
+  const prerelease = spicetifyManualDetails({ version: "2.50.0-beta.1" }, "x64");
+  assert.doesNotMatch(prerelease, /Target version: v\d/);
+  assert.match(prerelease, /releases/);
+});
+
+test("manager upgrade cancellation is checked before approval and before the child", async () => {
+  const root = await tempRoot("spicetify-cancel-manager-");
+  try {
+    const info: SpicetifyInfo = {
+      available: true,
+      path: "C:\\sp.exe",
+      version: "2.0.0",
+      owner: "winget",
+      configPath: null,
+      extensionsDir: null,
+      bridgeRegistered: false,
+    };
+
+    const alreadyRequested = createCancelToken();
+    alreadyRequested.request("sigint");
+    const first = createFakeRuntime(root, { env: {}, which: { winget: "C:\\winget.exe" }, run: () => { throw new Error("must not run"); } });
+    const firstResult = await upgradeSpicetifyWithManager(first, info, {
+      approve: async () => true,
+      cancel: alreadyRequested,
+    });
+    assert.equal(firstResult.code, 130);
+    assert.equal(firstResult.cancelled, true);
+    assert.equal(first.calls.length, 0);
+
+    const duringApproval = createCancelToken();
+    let approvals = 0;
+    const second = createFakeRuntime(root, { env: {}, which: { winget: "C:\\winget.exe" }, run: () => { throw new Error("must not run"); } });
+    const secondResult = await upgradeSpicetifyWithManager(second, info, {
+      cancel: duringApproval,
+      approve: async () => {
+        approvals += 1;
+        duringApproval.request("user");
+        return true;
+      },
+    });
+    assert.equal(approvals, 1);
+    assert.equal(secondResult.code, 130);
+    assert.equal(secondResult.cancelled, true);
+    assert.equal(second.calls.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("apply and backup are cancelled only before the start and protected afterwards", async () => {
+  const root = await tempRoot("spicetify-cancel-apply-");
+  try {
+    const token = createCancelToken();
+    let seenCancel: unknown;
+    let runs = 0;
+    const runtime = createFakeRuntime(root, { env: {}, which: {} });
+    runtime.run = async (_file, _args, options) => {
+      runs += 1;
+      seenCancel = (options as { cancel?: unknown } | undefined)?.cancel;
+      // A mid-flight cancellation must not change the result of an apply that
+      // already started: verification/running to completion is protected.
+      token.request("sigint");
+      return { code: 0, stdout: "ok", stderr: "" };
+    };
+    const applied = await applySpicetify(runtime, "C:\\sp.exe", true, { cancel: token });
+    assert.equal(applied.code, 0);
+    assert.equal(runs, 1);
+    assert.equal(seenCancel, token);
+
+    const preCancelled = createCancelToken();
+    preCancelled.request("sigint");
+    const untouched = createFakeRuntime(root, { env: {}, which: {}, run: () => { throw new Error("must not run"); } });
+    const blockedApply = await applySpicetify(untouched, "C:\\sp.exe", true, { cancel: preCancelled });
+    assert.equal(blockedApply.code, 130);
+    assert.equal(blockedApply.cancelled, true);
+    assert.equal(untouched.calls.length, 0);
+    const blockedBackup = await backupSpicetify(untouched, "C:\\sp.exe", { cancel: preCancelled });
+    assert.equal(blockedBackup.code, 130);
+    assert.equal(untouched.calls.length, 0);
+
+    const backupToken = createCancelToken();
+    let backupOptions: unknown;
+    const backupRuntime = createFakeRuntime(root, { env: {}, which: {} });
+    backupRuntime.run = async (_file, _args, options) => {
+      backupOptions = options;
+      return { code: 0, stdout: "backup ok", stderr: "" };
+    };
+    const backup = await backupSpicetify(backupRuntime, "C:\\sp.exe", { cancel: backupToken });
+    assert.equal(backup.code, 0);
+    assert.equal((backupOptions as { cancel?: unknown }).cancel, backupToken);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("restore refuses to start after cancellation", async () => {
+  const root = await tempRoot("spicetify-cancel-restore-");
+  try {
+    const token = createCancelToken();
+    token.request("sigint");
+    const runtime = createFakeRuntime(root, { env: {}, which: {}, run: () => { throw new Error("must not run"); } });
+    const info: SpicetifyInfo = {
+      available: true,
+      path: "C:\\sp.exe",
+      version: "2.0.0",
+      owner: "script",
+      configPath: null,
+      extensionsDir: null,
+      bridgeRegistered: false,
+    };
+    const result = await restoreSpotifyFromBackup(runtime, info, { cancel: token });
+    assert.equal(result.code, 130);
+    assert.equal(result.cancelled, true);
+    assert.equal(runtime.calls.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

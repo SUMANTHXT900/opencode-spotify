@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { updateAvailability, recommendUpdate, selectPluginTarget } from "../src/cli/update-plan.ts"
 import { registrationSpec } from "../src/cli/plan.ts"
 import { npmLatest, githubLatest, compareAvailable } from "../src/cli/versions.ts"
+import { createCancelToken } from "../src/cli/cancel.ts"
 import type { Runtime } from "../src/cli/types.ts"
 
 function runtimeWith(run: Runtime["run"]): Runtime {
@@ -102,7 +103,7 @@ test("shipped compatibility metadata matches the enforced constants", () => {
   assert.equal(metadata.minimum.spicetify, MIN_SPICETIFY)
 })
 
-test("registry lookups fail closed and parse stable output", async () => {
+test("registry lookups fail closed and parse npm channel tags unchanged", async () => {
   const good = runtimeWith(async () => ({ code: 0, stdout: '{"latest":"0.7.0","beta":"0.8.0-beta.1"}\n', stderr: "" }))
   const version = await npmLatest(good, "opencode-spotify", false)
   assert.equal(version.latest, "0.7.0")
@@ -114,8 +115,129 @@ test("registry lookups fail closed and parse stable output", async () => {
   const offline = await npmLatest(good, "opencode-spotify", true)
   assert.equal(offline.latest, null)
   assert.match(offline.error ?? "", /Offline/)
-  const fetcher = (async () => new Response(JSON.stringify({ tag_name: "v2.47.0" }), { status: 200 })) as typeof fetch
-  assert.equal((await githubLatest(good, "spicetify/cli", false, fetcher)).latest, "2.47.0")
-  const denied = (async () => new Response("{}", { status: 403 })) as typeof fetch
-  assert.match((await githubLatest(good, "spicetify/cli", false, denied)).error ?? "", /HTTP 403/)
+})
+
+// ---- githubLatest: strict stable Spicetify release discovery (F6) ----
+
+function releasePayload(tag: string, extra: Record<string, unknown> = {}): string {
+  const version = tag.replace(/^v/, "")
+  const assetName = `spicetify-${version}-windows-x64.zip`
+  const download = `https://github.com/spicetify/cli/releases/download/${tag}/${assetName}`
+  return JSON.stringify({
+    id: 12345,
+    tag_name: tag,
+    name: tag,
+    prerelease: tag.includes("-"),
+    draft: false,
+    published_at: "2026-11-01T00:00:00Z",
+    html_url: `https://github.com/spicetify/cli/releases/tag/${tag}`,
+    assets: [
+      {
+        name: assetName,
+        size: 11_829_528,
+        url: download,
+        browser_download_url: download,
+      },
+    ],
+    ...extra,
+  })
+}
+
+function jsonFetcher(tag: string): typeof fetch {
+  return (async () => new Response(releasePayload(tag), { status: 200 })) as typeof fetch
+}
+
+test("githubLatest uses the strict stable resolver, including future versions", async () => {
+  const runtime = runtimeWith(async () => ({ code: 0, stdout: "", stderr: "" }))
+  const future = await githubLatest(runtime, "spicetify/cli", false, jsonFetcher("v9.9.9"))
+  assert.equal(future.latest, "9.9.9", "a future stable release is not capped at the installer pin")
+  assert.equal(future.error, undefined)
+})
+
+test("githubLatest keeps prerelease-only and malformed releases unknown", async () => {
+  const runtime = runtimeWith(async () => ({ code: 0, stdout: "", stderr: "" }))
+  const prerelease = await githubLatest(runtime, "spicetify/cli", false, jsonFetcher("v9.9.9-beta.1"))
+  assert.equal(prerelease.latest, null, "a prerelease-only state is never reported as latest")
+  assert.ok(prerelease.error, "unknown state carries an error, not a silent null")
+
+  const malformed = (async () => new Response("{}", { status: 200 })) as typeof fetch
+  const unknown = await githubLatest(runtime, "spicetify/cli", false, malformed)
+  assert.equal(unknown.latest, null)
+  assert.ok(unknown.error)
+})
+
+test("githubLatest preserves rate-limit and 404 error strings", async () => {
+  const runtime = runtimeWith(async () => ({ code: 0, stdout: "", stderr: "" }))
+  const rateLimited = (async () => new Response('{"message":"API rate limit exceeded"}', { status: 403 })) as typeof fetch
+  const limited = await githubLatest(runtime, "spicetify/cli", false, rateLimited)
+  assert.equal(limited.latest, null)
+  assert.match(limited.error ?? "", /HTTP 403/)
+
+  const notFound = (async () => new Response('{"message":"Not Found"}', { status: 404 })) as typeof fetch
+  const absent = await githubLatest(runtime, "spicetify/cli", false, notFound)
+  assert.equal(absent.latest, null)
+  assert.match(absent.error ?? "", /HTTP 404/)
+
+  const offline = await githubLatest(runtime, "spicetify/cli", true, jsonFetcher("v9.9.9"))
+  assert.equal(offline.latest, null)
+  assert.match(offline.error ?? "", /Offline/)
+})
+
+test("githubLatest accepts an options object without a fetcher and honors cancellation", async () => {
+  const runtime = runtimeWith(async () => ({ code: 0, stdout: "", stderr: "" }))
+  // Overload check: a plain options object is not mistaken for a fetcher.
+  const offline = await githubLatest(runtime, "spicetify/cli", true, { cancel: createCancelToken() })
+  assert.match(offline.error ?? "", /Offline/)
+
+  const token = createCancelToken()
+  token.request("ctrl-c")
+  const cancelled = await githubLatest(runtime, "spicetify/cli", false, jsonFetcher("v9.9.9"), { cancel: token })
+  assert.equal(cancelled.latest, null)
+  assert.equal(cancelled.error, "Cancelled")
+
+  let signal: AbortSignal | undefined
+  let aborted = false
+  const hanging = ((_input: unknown, init?: RequestInit) => {
+    signal = init?.signal ?? undefined
+    return new Promise<Response>((_resolve, reject) => {
+      const fail = () => {
+        aborted = true
+        reject(new DOMException("Aborted", "AbortError"))
+      }
+      if (init?.signal?.aborted) fail()
+      else init?.signal?.addEventListener("abort", fail, { once: true })
+    })
+  }) as typeof fetch
+  const live = createCancelToken()
+  const pending = githubLatest(runtime, "spicetify/cli", false, hanging, { cancel: live })
+  await Promise.resolve()
+  live.request("user")
+  const stopped = await pending
+  assert.equal(stopped.latest, null)
+  assert.equal(stopped.error, "Cancelled")
+  assert.equal(aborted, true)
+  assert.equal(signal?.aborted, true)
+})
+
+test("npm lookups stop at a cancellation boundary", async () => {
+  const token = createCancelToken()
+  token.request("user")
+  let ran = false
+  const runtime = runtimeWith(async () => {
+    ran = true
+    return { code: 0, stdout: '{"latest":"0.7.0"}', stderr: "" }
+  })
+  const tags = await npmLatest(runtime, "opencode-spotify", false, { cancel: token })
+  assert.equal(ran, false)
+  assert.equal(tags.latest, null)
+  assert.equal(tags.error, "Cancelled")
+
+  const mid = createCancelToken()
+  const midRuntime = runtimeWith(async () => {
+    mid.request("sigint")
+    return { code: 1, stdout: "", stderr: "killed\n" }
+  })
+  const stopped = await npmLatest(midRuntime, "opencode-spotify", false, { cancel: mid })
+  assert.equal(stopped.latest, null)
+  assert.equal(stopped.error, "Cancelled")
 })

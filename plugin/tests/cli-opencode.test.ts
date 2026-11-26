@@ -2,16 +2,20 @@
 // binary or live config: every Runtime is stubbed in-memory.
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { join } from "node:path"
 import {
   addGlobalPlugin,
   inspectOpenCode,
   listPlugins,
+  listPluginsDetailed,
   neutralCwd,
   parsePluginList,
   projectPlugins,
+  reconcileRegistration,
   removeGlobalPlugin,
   updateGlobalPlugin,
 } from "../src/cli/opencode.ts"
+import { createCancelToken } from "../src/cli/cancel.ts"
 import type { CommandResult, ExecOptions, Runtime } from "../src/cli/types.ts"
 
 interface RecordedCall {
@@ -437,4 +441,122 @@ test("projectPlugins returns [] when opencode or the list fails", async () => {
     onRun: () => fail("boom\n"),
   })
   assert.deepEqual(await projectPlugins(failing), [])
+})
+
+// ---- cancellation (F6): tree kill, cancelled result, never retried ----
+
+const mutations = [
+  { name: "add", run: (runtime: Runtime, opts: { cancel?: ReturnType<typeof createCancelToken>; bin?: string }) => addGlobalPlugin(runtime, "opencode-spotify@0.6.0", opts), argv: ["plugin", "add", "opencode-spotify@0.6.0"] },
+  { name: "remove", run: (runtime: Runtime, opts: { cancel?: ReturnType<typeof createCancelToken>; bin?: string }) => removeGlobalPlugin(runtime, "opencode-spotify", opts), argv: ["plugin", "remove", "opencode-spotify"] },
+  { name: "update", run: (runtime: Runtime, opts: { cancel?: ReturnType<typeof createCancelToken>; bin?: string }) => updateGlobalPlugin(runtime, "opencode-spotify", opts), argv: ["plugin", "update", "opencode-spotify"] },
+] as const
+
+for (const mutation of mutations) {
+  test(`cancel during plugin ${mutation.name} kills the tree once and returns cancelled`, async () => {
+    const token = createCancelToken()
+    const runtime = createFakeRuntime({
+      onRun: () => {
+        // The child is killed by the runtime at the cancel boundary; the
+        // non-zero close code must never be retried.
+        token.request("ctrl-c")
+        return { code: 1, stdout: "partial\n", stderr: "" }
+      },
+    })
+    const result = await mutation.run(runtime, { cancel: token, bin: "opencode" })
+    assert.equal(runtime.calls.length, 1, "a cancelled mutation is never retried")
+    assert.deepEqual(runtime.calls[0]?.args, mutation.argv)
+    assert.equal(runtime.calls[0]?.options?.killPolicy, "tree")
+    assert.equal(runtime.calls[0]?.options?.cancel, token)
+    assert.equal(result.cancelled, true)
+    assert.equal(result.code, 1, "the child code is preserved")
+    assert.equal(result.error, "Cancelled")
+    assert.equal(result.stdout, "partial\n")
+  })
+
+  test(`pre-cancelled plugin ${mutation.name} spawns nothing`, async () => {
+    const token = createCancelToken()
+    token.request("user")
+    const runtime = createFakeRuntime({ onRun: () => ok("should not run\n") })
+    const result = await mutation.run(runtime, { cancel: token })
+    assert.equal(runtime.calls.length, 0)
+    assert.equal(result.cancelled, true)
+    assert.equal(result.code, 1)
+    assert.equal(result.error, "Cancelled")
+  })
+}
+
+test("cancelled:true from the runtime is honored without a token", async () => {
+  const runtime = createFakeRuntime({ onRun: () => ({ code: 130, stdout: "", stderr: "", cancelled: true }) })
+  const result = await addGlobalPlugin(runtime, "opencode-spotify@0.6.0")
+  assert.equal(result.cancelled, true)
+  assert.equal(result.code, 130)
+  assert.equal(result.error, "Cancelled")
+  assert.equal(runtime.calls.length, 1)
+})
+
+test("removeGlobalPlugin uses the resolved binary when none is given (D15)", async () => {
+  const homedir = "C:\\Users\\fake"
+  const resolved = join(homedir, ".opencode", "bin", "opencode.exe")
+  const runtime = createFakeRuntime({
+    which: {},
+    env: {},
+    homedir,
+    exists: (path) => path === resolved,
+    isFile: (path) => path === resolved,
+    onRun: () => ok("removed\n"),
+  })
+  const result = await removeGlobalPlugin(runtime, "opencode-spotify")
+  assert.equal(result.code, 0)
+  assert.equal(runtime.calls.length, 1)
+  assert.equal(runtime.calls[0]?.file, resolved)
+  assert.deepEqual(runtime.calls[0]?.args, ["plugin", "remove", "opencode-spotify"])
+  assert.equal(runtime.calls[0]?.options?.killPolicy, "tree")
+})
+
+test("an explicit bin overrides resolved discovery for every mutation", async () => {
+  const runtime = createFakeRuntime({ which: { opencode: "C:\\tools\\opencode.exe" }, onRun: () => ok("") })
+  await addGlobalPlugin(runtime, "opencode-spotify@0.6.0", { bin: "C:\\custom\\opencode.exe" })
+  await removeGlobalPlugin(runtime, "opencode-spotify", { bin: "C:\\custom\\opencode.exe" })
+  await updateGlobalPlugin(runtime, undefined, { bin: "C:\\custom\\opencode.exe" })
+  assert.deepEqual(runtime.calls.map((call) => call.file), [
+    "C:\\custom\\opencode.exe",
+    "C:\\custom\\opencode.exe",
+    "C:\\custom\\opencode.exe",
+  ])
+})
+
+test("listPluginsDetailed honors cancellation boundaries", async () => {
+  const pre = createCancelToken()
+  pre.request("sigterm")
+  const idle = createFakeRuntime({ onRun: () => ok("") })
+  const skipped = await listPluginsDetailed(idle, "C:\\Temp", "opencode", { cancel: pre })
+  assert.equal(idle.calls.length, 0)
+  assert.equal(skipped.outcome, "failed")
+  assert.equal(skipped.detail, "Cancelled")
+
+  const mid = createCancelToken()
+  const runtime = createFakeRuntime({
+    onRun: () => {
+      mid.request("ctrl-c")
+      return { code: 0, stdout: "opencode-spotify  0.6.0\n", stderr: "" }
+    },
+  })
+  const listed = await listPluginsDetailed(runtime, "C:\\Temp", "opencode", { cancel: mid })
+  assert.equal(runtime.calls.length, 1)
+  assert.equal(runtime.calls[0]?.options?.cancel, mid)
+  assert.equal(runtime.calls[0]?.options?.killPolicy, "tree")
+  assert.equal(listed.outcome, "failed")
+  assert.equal(listed.detail, "Cancelled")
+  assert.deepEqual(listed.entries, [])
+})
+
+test("reconcileRegistration stops at a cancellation boundary", async () => {
+  const token = createCancelToken()
+  token.request("user")
+  const runtime = createFakeRuntime({ onRun: () => ok("") })
+  const reconciled = await reconcileRegistration(runtime, "opencode-spotify", "opencode", { cancel: token })
+  assert.equal(runtime.calls.length, 0)
+  assert.equal(reconciled.state, "unknown")
+  assert.equal(reconciled.outcome, "failed")
+  assert.equal(reconciled.detail, "Cancelled")
 })

@@ -1,0 +1,10 @@
+OpenCode Spotify           v0.6.0-beta.3
+
+| Spotify source
+| Pick a playback source.
+
+  > Local desktop app
+    Web player
+    Skip for now
+
+  j/k move  enter select

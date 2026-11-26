@@ -5,6 +5,7 @@ import { lstatSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { BRIDGE_PROTOCOL } from "./compat.ts";
 import { packageRoot, OPERATION_TIMEOUTS } from "./runtime.ts";
+import { spicetifyBackupCandidates } from "./spicetify.ts";
 import type { BridgeInfo, CommandResult, Runtime, SpicetifyInfo } from "./types.ts";
 
 export const BRIDGE_FILE = "opencode-spotify-bridge.js";
@@ -19,6 +20,8 @@ export interface BridgeOperationOptions {
 
 export interface ApplyBridgeOptions {
   spicetifyPath?: string | null;
+  /** Optional progress sink (B24). Never receives secrets. */
+  onProgress?: (line: string) => void;
 }
 
 export function bridgeConfigDir(runtime: Runtime): string {
@@ -217,10 +220,24 @@ export async function bridgeOperation(
  * once first (never overwriting a valid backup), then apply. When the first
  * apply fails with a backup-related error, retry once after a backup.
  * Returns the final apply result; backup output is folded into stdout.
+ *
+ * B24: explicit progress reporting around the backup-first flow. When a
+ * missing backup is detected, when the backup is created, when apply runs,
+ * and a post-apply verification line are all reported via `onProgress`
+ * (wired to UI by callers). Never claims playback was verified.
  */
 export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): Promise<CommandResult> {
   const exe =
     opts.spicetifyPath ?? (await runtime.which("spicetify").catch(() => undefined)) ?? "spicetify";
+  // Progress is informational only: a broken sink must never abort (or
+  // mis-report) an apply that may already have mutated the installation.
+  const progress = (line: string): void => {
+    try {
+      opts.onProgress?.(line);
+    } catch {
+      // Swallow reporter failures; the operation result is the source of truth.
+    }
+  };
   // Anchored backup-missing matcher: only genuine "no backup" failures from
   // `spicetify apply` trigger the retry path — never incidental mentions of
   // backup paths, files, or unrelated output.
@@ -231,6 +248,7 @@ export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): P
   let didBackup = false;
   const needsBackup = hasMissingBackup(runtime);
   if (needsBackup) {
+    progress("Spicetify backup not found; creating a backup before apply.");
     const backup = await runtime.run(exe, ["backup"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup });
     if (backup.code !== 0) {
       return {
@@ -241,10 +259,16 @@ export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): P
         ...(backup.timedOut ? { timedOut: true as const } : {}),
       };
     }
+    progress("Spicetify backup created.");
     didBackup = true;
   }
+  progress("Running spicetify apply.");
   const first = await runtime.run(exe, ["apply"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyApply });
-  if (first.code === 0 || !isBackupMissingError(first)) {
+  if (first.code === 0) {
+    progress("Spicetify apply completed (playback not verified).");
+    return first;
+  }
+  if (!isBackupMissingError(first)) {
     return first;
   }
   // Already backed up once for this invocation: do not overwrite again.
@@ -252,6 +276,7 @@ export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): P
     return { ...first, error: `${first.error ?? "spicetify apply failed"} (a backup was already taken; not retrying to avoid overwriting it)` };
   }
   // Backup-related failure: ensure a backup exists, then retry once.
+  progress("Spicetify apply reported a missing backup; creating a backup before retry.");
   const backup = await runtime.run(exe, ["backup"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup });
   if (backup.code !== 0) {
     return {
@@ -263,16 +288,23 @@ export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): P
       ...(typeof (backup.durationMs ?? first.durationMs) === "number" ? { durationMs: (backup.durationMs ?? first.durationMs) as number } : {}),
     };
   }
-  return runtime.run(exe, ["apply"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyApply });
+  progress("Spicetify backup created.");
+  progress("Running spicetify apply.");
+  const retried = await runtime.run(exe, ["apply"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyApply });
+  if (retried.code === 0) {
+    progress("Spicetify apply completed (playback not verified).");
+  }
+  return retried;
 }
 
-/** True when the well-known Spicetify backup directory is absent (B09). Never throws. */
+/** True when every known Spicetify backup directory is absent (B09/B05). Never throws. */
 function hasMissingBackup(runtime: Runtime): boolean {
   try {
-    const localBase = runtime.env.LOCALAPPDATA || join(runtime.homedir, "AppData", "Local");
-    const candidates = [join(localBase, "spicetify", "Backup"), join(localBase, "Spicetify", "Backup")];
+    // B05: a valid backup may live in the roaming state root, not only under
+    // %LOCALAPPDATA%. Probe the shared candidate list so an existing backup is
+    // never overwritten by an unnecessary `spicetify backup`.
     let sawCandidate = false;
-    for (const dir of candidates) {
+    for (const dir of spicetifyBackupCandidates(runtime)) {
       try {
         if (runtime.exists(dir)) return false;
         sawCandidate = true;
@@ -282,6 +314,7 @@ function hasMissingBackup(runtime: Runtime): boolean {
     }
     return sawCandidate;
   } catch {
+    // Fail closed: if candidates cannot even be computed, do not force a backup.
     return false;
   }
 }

@@ -3,25 +3,38 @@ name: CI
 # Windows-only verification for the V0.6.0 prerelease line. No Linux or macOS
 # jobs: the installer, Spicetify handling, rendering assertions and the packed
 # provisioner smoke are Windows-specific by design.
+#
+# No workflow-level path filtering: both check names below are always emitted
+# for every push/PR so required checks never go silent. Costly runners are
+# still exactly the two windows-2025 jobs below.
+#
+# Reusable: release.yml prepare calls this workflow with
+# retain_release_candidate=true. The single full verify-package run then
+# retains the exact tarball plus sidecars and a machine-readable proof.json
+# (source SHA, version, digests, verifier identity) and uploads all of them
+# as ONE candidate artifact. The successful prepare run as a whole is the
+# authority; proof.json is evidence, not trust on its own.
 
 on:
   push:
     branches: [main]
-    paths:
-      - "plugin/**"
-      - ".github/workflows/ci.yml"
   pull_request:
-    paths:
-      - "plugin/**"
-      - ".github/workflows/ci.yml"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      retain_release_candidate:
+        description: "Retain the verified tarball + sidecars + proof.json as the single release-candidate artifact"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
-# Cancel superseded branch runs; never cancel main.
+# Include the workflow name so a reusable call from release.yml never shares
+# (or cancels) a standalone CI run. Main is never cancelled.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -39,6 +52,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify required helper scripts exist (fail fast on partial checkout)
+        run: |
+          $missing = @(
+            'plugin/scripts/verify-package.mjs',
+            'plugin/scripts/verify-package-lib.mjs',
+            'plugin/scripts/check-test-accounting.mjs',
+            'plugin/scripts/compatibility-candidates.mjs',
+            '.github/scripts/validate-release-policy.mjs',
+            '.github/scripts/release-policy.test.mjs'
+          ) | Where-Object { -not (Test-Path (Join-Path $env:GITHUB_WORKSPACE $_)) }
+          if ($missing) { Write-Error "missing required helper(s): $($missing -join ', ')"; exit 1 }
+
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -47,7 +72,7 @@ jobs:
           cache-dependency-path: plugin/package-lock.json
 
       - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Typecheck
         run: npm run typecheck
@@ -55,23 +80,34 @@ jobs:
       - name: Check bridge JavaScript syntax
         run: node --check spicetify/opencode-spotify-bridge.js
 
-      - name: Inspect the npm package without publishing
-        run: npm pack --dry-run --ignore-scripts
-
       # Report all advisories. The documented baseline has moderate
       # findings without a compatible fix; high and critical findings fail CI.
       - name: Audit dependencies (fail on high or critical)
         run: npm audit --audit-level=high
 
-      # Fast subset only. Packaging fixtures (package-smoke, verify-artifact)
-      # and Bun-native suites (artwork, layout-render, VT) run in render-pack.
-      - name: Run fast unit tests (excludes packaging, VT and Bun-native suites)
+      # Fast Node-only subset. The cheap packaging-behavior suites
+      # (package-smoke, verify-artifact) run here inside test:fast; the single
+      # full verify-package gate runs in render-pack. Bun-native suites and VT
+      # run in render-pack.
+      - name: Run fast unit tests (Node-only; includes cheap packaging-behavior suites)
         run: npm run test:fast
+
+      - name: Check test accounting (every suite in exactly one bucket)
+        run: node scripts/check-test-accounting.mjs
+
+      - name: Lint workflow syntax (actionlint)
+        run: pwsh -NoProfile -File ../.github/scripts/actionlint.ps1
+
+      - name: Test release input and artifact policy
+        run: node --test ../.github/scripts/release-policy.test.mjs
+
+      - name: Test compatibility candidate selection and scratch boundaries
+        run: node scripts/compatibility-candidates.mjs selftest
 
   render-pack:
     name: Rendering and package verification (Windows + Bun)
     runs-on: windows-2025
-    timeout-minutes: 12
+    timeout-minutes: 15
     defaults:
       run:
         shell: pwsh
@@ -94,34 +130,50 @@ jobs:
         with:
           bun-version: '1.3.14'
 
-      - name: Cache Bun modules
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-1.3.14-${{ runner.os }}-${{ hashFiles('plugin/package-lock.json') }}
-          restore-keys: |
-            bun-1.3.14-${{ runner.os }}-
-
       - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Verify native rendering
-        run: npm run test:render
+      # test:bun already runs artwork.test.ts and layout-render.test.ts, which
+      # spawn the same render-artwork.tsx / render-layout.tsx fixtures as
+      # test:artwork / test:render. Running both shapes executes each native
+      # suite twice.
+      - name: Run Bun-native suites (artwork, layout, tui-state)
+        run: npm run test:bun
 
       - name: Verify persistent VT transitions
         run: npm run test:vt
 
-      - name: Verify artwork
-        run: npm run test:artwork
-
-      # Bun-native unit suites: they shell out to `bun`, so they live with the
-      # Bun toolchain instead of the Bun-less unit job.
-      - name: Run Bun-native unit suites
-        run: npm run test:bun
-
-      # Single full verification: builds dist/, packs, asserts the exact file
-      # list, installs into an isolated prefix, runs bin --version/--help and
-      # the packed provisioner smoke. No artifact upload; release.yml retains
-      # the digest-verified tarball at publish time.
+      # Single full verification. Without retention (plain CI) it packs,
+      # asserts, installs and probes, then discards temp state. With retention
+      # (release prepare) it keeps the exact verified bytes for upload below.
       - name: Verify packed package
+        if: ${{ inputs.retain_release_candidate != true }}
         run: node scripts/verify-package.mjs
+
+      - name: Verify packed package and retain exact bytes
+        if: ${{ inputs.retain_release_candidate == true }}
+        env:
+          KEEP_DIR: ${{ runner.temp }}/release-candidate
+        run: node scripts/verify-package.mjs --keep-dir "$env:KEEP_DIR"
+
+      - name: Write candidate proof (source SHA, version, digests, verifier)
+        if: ${{ inputs.retain_release_candidate == true }}
+        env:
+          CANDIDATE_DIR: ${{ runner.temp }}/release-candidate
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          REPOSITORY: ${{ github.repository }}
+        run: node ../.github/scripts/validate-release-policy.mjs write-proof
+
+      # ONE candidate archive: the exact tgz CI verified, both sidecars, and
+      # the machine-readable proof. Downloaded by release.yml publish via gh
+      # from the validated prepare run; never rebuilt after QA.
+      - name: Upload release candidate (tgz + sidecars + proof)
+        if: ${{ inputs.retain_release_candidate == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+          if-no-files-found: error
+          retention-days: 30

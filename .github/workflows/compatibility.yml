@@ -1,0 +1,169 @@
+name: Compatibility (manual + weekly opt-in)
+
+# WP-E scoped probing. Manual via workflow_dispatch; the weekly Monday schedule
+# runs ONLY when the repo Actions variable SPOTIFY_COMPAT_SCHEDULE is exactly
+# 'true' (per-job gate; unset costs ~zero and never blocks manual runs). No
+# publication, artifacts, or credentials: permissions contents:read.
+# Windows-only (windows-2025); actions pinned to full SHAs (same as CI);
+# explicit job timeout; no continue-on-error; no blanket skips — step `if`s
+# select disjoint lanes only. One matrix job, three explicit lanes:
+# floor-engines (engine floors + locked manifest + npm ci + host probe),
+# renderer-sdk (latest stable renderer + lockstep core + newest peer Solid +
+# latest SDK), installer-runtimes (latest Ink/React/types/UI + latest stable
+# Node with a HEAD-verified win-x64 asset + stable Bun + packed gate).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  compat:
+    name: ${{ matrix.lane }} (Windows)
+    if: github.event_name != 'schedule' || vars.SPOTIFY_COMPAT_SCHEDULE == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [floor-engines, renderer-sdk, installer-runtimes]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve lane toolchain (fail closed)
+        id: tool
+        env:
+          LANE: ${{ matrix.lane }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:LANE -eq 'floor-engines') { $outputs = @('node=22.18.0', 'bun=1.3.14') }
+          elseif ($env:LANE -eq 'renderer-sdk') { $outputs = @('node=24.12.0', 'bun=1.3.14') }
+          else {
+            $dist = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 20
+            $node = @($dist | Where-Object { $_.version -match '^v\d+\.\d+\.\d+$' } | Select-Object -ExpandProperty version)[0]
+            if (-not $node) { Write-Error 'UNVERIFIED: node dist index yielded no stable version'; exit 1 }
+            $node = $node.TrimStart('v')
+            try { Invoke-WebRequest -Method Head -Uri "https://nodejs.org/dist/v$node/node-v$node-win-x64.zip" -TimeoutSec 20 | Out-Null }
+            catch { Write-Error "UNVERIFIED: node $node has no downloadable win-x64 asset"; exit 1 }
+            $bun = (npm view bun version --no-audit --registry https://registry.npmjs.org/).Trim()
+            if ($bun -notmatch '^\d+\.\d+\.\d+$') { Write-Error "UNVERIFIED: bun '$bun' is not stable"; exit 1 }
+            $outputs = @("node=$node", "bun=$bun")
+          }
+          $outputs | ForEach-Object { $_ >> $env:GITHUB_OUTPUT }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.tool.outputs.node }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ steps.tool.outputs.bun }}
+
+      - name: Report actual runtime
+        run: |
+          node --version; if ($LASTEXITCODE -ne 0) { exit 1 }
+          bun --version; if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Resolve lane candidates (single registry pass)
+        env:
+          LANE: ${{ matrix.lane }}
+          CAND: ${{ runner.temp }}/candidates.json
+          NODE_VER: ${{ steps.tool.outputs.node }}
+          BUN_VER: ${{ steps.tool.outputs.bun }}
+        working-directory: plugin
+        run: node scripts/compatibility-candidates.mjs resolve --lane $env:LANE --out $env:CAND --node $env:NODE_VER --bun $env:BUN_VER
+
+      - name: Stage exclusive scratch copy
+        id: scratch
+        env:
+          CAND: ${{ runner.temp }}/candidates.json
+        working-directory: plugin
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $raw = node scripts/compatibility-candidates.mjs apply --in $env:CAND --parent $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $dir = $raw | Select-Object -Last 1
+          if (-not $dir) { Write-Error 'UNVERIFIED: apply printed no scratch path'; exit 1 }
+          "scratch=$dir" >> $env:GITHUB_OUTPUT
+
+      - name: Install lane dependencies
+        env:
+          LANE: ${{ matrix.lane }}
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: |
+          if ($env:LANE -eq 'floor-engines') { npm ci --ignore-scripts --no-audit }
+          else { npm install --ignore-scripts --no-audit --no-fund }
+
+      - name: Audit lane dependencies (fail on high or critical)
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: npm audit --audit-level=high
+
+      - name: Verify test accounting
+        working-directory: plugin
+        run: node scripts/check-test-accounting.mjs
+
+      - name: Typecheck
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: npm run typecheck
+
+      - name: Check bridge JavaScript syntax
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: node --check spicetify/opencode-spotify-bridge.js
+
+      - name: Run Bun-native suites
+        if: matrix.lane != 'installer-runtimes'
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: npm run test:bun
+
+      - name: Run fast Node tests
+        if: matrix.lane != 'renderer-sdk'
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: npm run test:fast
+
+      - name: Verify persistent VT transitions
+        if: matrix.lane != 'installer-runtimes'
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: npm run test:vt
+
+      - name: Report actual installed versions (absent fails)
+        env:
+          SCRATCH: ${{ steps.scratch.outputs.scratch }}
+        working-directory: plugin
+        run: node scripts/compatibility-candidates.mjs installed --scratch $env:SCRATCH
+
+      - name: Probe isolated host binary (floor only, version check only)
+        if: matrix.lane == 'floor-engines'
+        working-directory: plugin
+        run: node scripts/compatibility-candidates.mjs probe-host --version 2.3.0
+
+      - name: Verify packed package (true consumer gate)
+        env:
+          LANE: ${{ matrix.lane }}
+        working-directory: ${{ steps.scratch.outputs.scratch }}
+        run: npm run verify:package -- --keep-dir "$env:RUNNER_TEMP/compat-keep-$env:LANE"
+
+      - name: Append lane summary
+        if: always()
+        env:
+          CAND: ${{ runner.temp }}/candidates.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "## compat ${{ matrix.lane }}: ${{ job.status }}" >> $env:GITHUB_STEP_SUMMARY
+          $env:COMPAT_SUMMARY_FILE = $env:GITHUB_STEP_SUMMARY
+          node scripts/compatibility-candidates.mjs report --in $env:CAND
+          if ($LASTEXITCODE -ne 0) { exit 1 }

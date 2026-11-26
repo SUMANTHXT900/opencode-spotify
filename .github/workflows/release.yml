@@ -1,29 +1,65 @@
 # Release to npm — MANUAL ONLY, currently INACTIVE.
 #
-# This workflow does nothing on push or pull_request. It runs only via an
-# explicit `workflow_dispatch` by a maintainer, the `publish` job additionally
-# requires the `npm-release` GitHub environment (required reviewers + branch
-# rules recommended) to exist and approve the run, AND the repository Actions
-# variable `NPM_PUBLISH_ENABLED` must be exactly `true` (Settings -> Variables
-# -> Actions -> New repository variable). The variable is unset by default, so
-# the publish job is skipped until the developer deliberately enables it: this
-# is the kill switch that makes the workflow genuinely inactive.
+# One workflow, two phases, separate dispatches:
+#   prepare: workflow_dispatch with prepare_run_id empty and confirm == PREPARE.
+#     Validates the exact version plus the beta/latest branch policy, then
+#     calls the reusable CI workflow, which runs the single full
+#     verify-package gate and uploads ONE candidate artifact (tgz + .sha256 +
+#     .integrity + proof.json). The successful prepare RUN as a whole is the
+#     authority for what QA tested.
+#   publish: workflow_dispatch with prepare_run_id set to that earlier
+#     successful prepare run ID, confirm == PUBLISH, plus the QA-attested
+#     digests. Validates the exact canonical SHA-256 / SHA-512, explicit
+#     PUBLISH, version/channel/ref/branch types, the earlier run ID (numeric,
+#     != current), and vars.NPM_PUBLISH_ENABLED == true; checks via `gh api`
+#     that the named run is a successfully completed workflow_dispatch run of
+#     THIS same repo and THIS release.yml (path/workflow identity, head
+#     repository, SHA, branch, conclusion); downloads ONLY that candidate;
+#     rechecks both hashes plus proof metadata (including proof run_id,
+#     repository, and verifier identity) against the QA attestation inputs;
+#     then publishes the exact downloaded bytes.
 #
-# Activation prerequisites (all still pending — see docs/DISTRIBUTION.md):
+# Separate PREPARE / PUBLISH confirmations keep the two phases
+# unambiguous: a prepare dispatch can never satisfy the publish gate and
+# vice versa.
+#
+# Publish-job checkout discipline (parent-review fix): the publish job mints
+# the OIDC token, so it must not check out and execute unreviewed code. The
+# first step is a pure-shell gate (no code executed): it rejects tag
+# dispatches outright, requires the dispatch branch to be main or release/*,
+# and requires the dispatch commit (github.sha) to equal the QA-attested
+# source SHA on the QA-attested branch. Only then does the job sparse-check
+# out the single reviewed helper file at that exact, already-approved commit
+# (SHA-pinned checkout, persist-credentials: false). In practice this means a
+# publish dispatch must run from the candidate commit itself: land nothing
+# new on the release branch between prepare and publish, or re-run prepare.
+#
+# Rerun ambiguity: `gh run download <run-id>` resolves artifacts for the run,
+# so a re-run of prepare could replace the candidate bytes afterwards. That
+# is neutralized by binding, not by attempt tracking: publish recomputes both
+# digests from the downloaded bytes and requires them (plus proof version /
+# source / run_id / repository / verifier) to equal the QA attestation. Any
+# changed byte fails closed. The prepare run attempt is logged for evidence.
+#
+# Registry reads and publish all pin --registry=https://registry.npmjs.org so
+# a mirror/redirect baseline can never substitute a different view of the
+# package. A strict-SemVer dist-tag preflight additionally refuses to move
+# the selected tag backwards (prerelease precedence per semver.org item 11);
+# a missing tag (first use) allows. The installer itself never downgrades,
+# so this preflight is a second, registry-side guard.
+#
+# Digest-input approval rule (replaces the old qa_passed boolean): both beta
+# and latest publish dispatches require expected_sha256 + expected_sha512 that
+# exactly match the candidate. The digests are the QA attestation.
+#
+# Activation prerequisites (all still pending — see docs/MAINTAINERS.md):
 #   1. The npm package `opencode-spotify` must exist and list this repository
 #      as a trusted publisher (npm Package Settings -> Trusted Publisher), so
 #      OIDC trusted publishing works. No NPM_TOKEN is used anywhere here.
 #   2. A GitHub environment named `npm-release` must be configured with
 #      required reviewers (and ideally a branch restriction to `main`).
 #   3. Set the repository variable `NPM_PUBLISH_ENABLED` to `true`.
-#   4. First publish must be manual (OIDC cannot create the package). Publish a
-#      prerelease such as 0.6.0-beta.1 under `beta`; npm also points `latest`
-#      at the first published version. Never publish stable `latest` before
-#      physical QA; `latest` additionally requires qa_passed=true here.
-#
-# Artifact integrity: the build job writes SHA-256 and npm-integrity sidecars
-# next to the tarball and uploads both; the publish job re-verifies both
-# digests before publishing, so exactly the tarball CI verified is what ships.
+#   4. First publish must be manual (OIDC cannot create the package).
 #
 # Private-repository caveat: this repository is currently private. npm does
 # not support provenance attestations from a private repository, so the
@@ -32,10 +68,8 @@
 # separate approval.
 #
 # Every third-party action below is pinned to a full commit SHA (comment shows
-# the version tag it corresponds to). The only global install is a pinned
-# npm upgrade inside the publish job, and only when the runner's npm is older
-# than 11.5.1 (the minimum for OIDC trusted publishing). No step touches
-# Spotify/Spicetify or writes any OpenCode configuration.
+# the version tag it corresponds to). No step touches Spotify/Spicetify or
+# writes any OpenCode configuration.
 
 name: Release to npm (manual)
 
@@ -43,7 +77,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Exact package version to release (e.g. 0.6.0, no leading v)"
+        description: "Exact package version to release (e.g. 0.6.0-beta.4, no leading v)"
         required: true
       dist_tag:
         description: "npm dist-tag"
@@ -54,13 +88,28 @@ on:
           - beta
           - latest
       confirm:
-        description: "Type PUBLISH to confirm an irreversible npm publish"
+        description: "Phase confirmation: PREPARE to build a candidate, PUBLISH to publish to npm"
         required: true
-      qa_passed:
-        description: "Physical QA gates passed (required for the latest dist-tag)"
+      expected_sha256:
+        description: "Publish only: QA-attested canonical SHA-256 of the candidate tarball (lowercase hex)"
         required: false
-        default: false
-        type: boolean
+        default: ""
+      expected_sha512:
+        description: "Publish only: QA-attested canonical integrity of the candidate tarball (sha512-<base64==>)"
+        required: false
+        default: ""
+      prepare_run_id:
+        description: "Publish only: earlier successful prepare run ID of this workflow (empty = prepare phase)"
+        required: false
+        default: ""
+      source_sha:
+        description: "Publish only: QA-attested source commit SHA of the candidate"
+        required: false
+        default: ""
+      source_branch:
+        description: "Publish only: QA-attested source branch of the candidate (main or release/*)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -70,8 +119,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
+  prepare:
     name: Validate release inputs
+    if: ${{ inputs.prepare_run_id == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -80,194 +130,254 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require explicit PUBLISH confirmation
-        shell: bash
-        run: |
-          if [ "${{ inputs.confirm }}" != "PUBLISH" ]; then
-            echo "::error::Refusing to publish: 'confirm' must be exactly PUBLISH."
-            exit 1
-          fi
-
-      - name: Validate version, dist-tag, and branch
-        shell: bash
-        run: |
-          VERSION="${{ inputs.version }}"
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Version '$VERSION' is not semver (leading v is not allowed)."
-            exit 1
-          fi
-          if [ "${{ inputs.dist_tag }}" != "beta" ] && [ "${{ inputs.dist_tag }}" != "latest" ]; then
-            echo "::error::dist-tag must be beta or latest."
-            exit 1
-          fi
-          if [ "${{ inputs.dist_tag }}" = "latest" ] && [ "${{ inputs.qa_passed }}" != "true" ]; then
-            echo "::error::dist-tag 'latest' requires qa_passed=true (physical QA gates in docs/DISTRIBUTION.md). Use 'beta' first."
-            exit 1
-          fi
-          if [ "${{ inputs.dist_tag }}" = "beta" ] && [[ "$VERSION" != *-* ]]; then
-            echo "::error::The beta tag requires a prerelease version such as 0.6.0-beta.1. A first publish of a stable version also sets latest, which must wait for physical QA."
-            exit 1
-          fi
-          if [ "${{ inputs.dist_tag }}" = "latest" ] && [[ "$VERSION" == *-* ]]; then
-            echo "::error::The latest tag requires a stable version without a prerelease suffix."
-            exit 1
-          fi
-          PKG_VERSION="$(node -p "require('./plugin/package.json').version")"
-          if [ "$PKG_VERSION" != "$VERSION" ]; then
-            echo "::error::Input version '$VERSION' does not match plugin/package.json version '$PKG_VERSION'."
-            exit 1
-          fi
-          REF="${{ github.ref_name }}"
-          if [ "$REF" != "main" ] && [[ "$REF" != release/* ]]; then
-            echo "::error::Releases must run from 'main' or a 'release/*' branch (running from '$REF')."
-            exit 1
-          fi
-          echo "Release inputs valid: opencode-spotify@$VERSION tag=${{ inputs.dist_tag }} ref=$REF"
-
-  build:
-    name: Build, test, and pack on Windows
-    needs: validate
-    runs-on: windows-2025
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: pwsh
-        working-directory: plugin
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.12.0'
-          cache: npm
-          cache-dependency-path: plugin/package-lock.json
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: '1.3.14'
+      - name: Validate exact version plus beta/latest branch policy
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+          INPUT_CONFIRM: ${{ inputs.confirm }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: node .github/scripts/validate-release-policy.mjs prepare
 
-      - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Run the full test suite
-        run: npm test
-
-      - name: Build the compiled CLI
-        run: npm run build:cli
-
-      - name: Verify packed package and retain the exact tarball
-        run: node scripts/verify-package.mjs --keep-dir "$env:RUNNER_TEMP/release-artifact"
-
-      - name: Upload release tarball and digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: opencode-spotify-${{ inputs.version }}
-          path: ${{ runner.temp }}/release-artifact/opencode-spotify-${{ inputs.version }}.tgz
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload release digest sidecars
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: opencode-spotify-${{ inputs.version }}-digests
-          path: |
-            ${{ runner.temp }}/release-artifact/opencode-spotify-${{ inputs.version }}.tgz.sha256
-            ${{ runner.temp }}/release-artifact/opencode-spotify-${{ inputs.version }}.tgz.integrity
-          if-no-files-found: error
-          retention-days: 30
+  candidate:
+    name: Build release candidate (reusable CI)
+    needs: prepare
+    if: ${{ inputs.prepare_run_id == '' }}
+    uses: ./.github/workflows/ci.yml
+    with:
+      retain_release_candidate: true
+    permissions:
+      contents: read
 
   publish:
-    name: Publish exact tarball to npm (OIDC)
-    needs: build
-    # Kill switch: unset/anything-but-true skips this job. Set the repository
-    # Actions variable NPM_PUBLISH_ENABLED to exactly `true` to enable.
-    if: vars.NPM_PUBLISH_ENABLED == 'true'
+    name: Publish exact candidate to npm (OIDC)
+    if: ${{ inputs.prepare_run_id != '' && inputs.confirm == 'PUBLISH' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: npm-release
     permissions:
       contents: read
+      actions: read
       id-token: write
     steps:
+      - name: Gate dispatch ref and approved source (pre-checkout, executes no repo code)
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          CURRENT_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "branch" ]; then echo "::error::tag dispatches are rejected; dispatch publish from the candidate branch."; exit 1; fi
+          case "$REF_NAME" in main|release/?*) ;; *) echo "::error::publish must run from 'main' or a 'release/*' branch."; exit 1;; esac
+          case "$SOURCE_SHA" in ''|*[!0-9a-f]*) echo "::error::source_sha must be a 40-char lowercase commit SHA."; exit 1;; esac
+          if [ "${#SOURCE_SHA}" -ne 40 ]; then echo "::error::source_sha must be a 40-char lowercase commit SHA."; exit 1; fi
+          case "$SOURCE_BRANCH" in main|release/?*) ;; *) echo "::error::source_branch must be 'main' or 'release/*'."; exit 1;; esac
+          if [ "$CURRENT_SHA" != "$SOURCE_SHA" ]; then echo "::error::dispatch commit must equal the QA-attested source commit (dispatch publish from the candidate commit; re-run prepare if the branch moved)."; exit 1; fi
+          if [ "$REF_NAME" != "$SOURCE_BRANCH" ]; then echo "::error::dispatch branch must equal the QA-attested source branch."; exit 1; fi
+          echo "Dispatch ref matches the approved candidate source."
+
+      - name: Check out only the reviewed release helper (sparse, exact approved commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/validate-release-policy.mjs
+          sparse-checkout-cone-mode: false
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.12.0'
 
-      - name: Ensure npm supports OIDC trusted publishing
-        shell: bash
-        # Node 24.12.0 ships npm 11.6.2 (observed), which already qualifies;
-        # this step is a guard for runner image drift, not the common path.
+      - name: Validate publish inputs (digests, PUBLISH, run ID, kill switch)
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+          INPUT_CONFIRM: ${{ inputs.confirm }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          EXPECTED_SHA512: ${{ inputs.expected_sha512 }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          NPM_PUBLISH_ENABLED: ${{ vars.NPM_PUBLISH_ENABLED }}
+        run: node .github/scripts/validate-release-policy.mjs publish
+
+      - name: Confirm candidate comes from this repo's successful release run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          EXPECTED_PATH: .github/workflows/release.yml
         run: |
+          set -euo pipefail
+          case "$PREPARE_RUN_ID" in ''|*[!0-9]*) echo "::error::prepare_run_id must be numeric."; exit 1;; esac
+          case "$CURRENT_RUN_ID" in ''|*[!0-9]*) echo "::error::current run ID is not numeric."; exit 1;; esac
+          if [ "$PREPARE_RUN_ID" = "$CURRENT_RUN_ID" ]; then echo "::error::prepare_run_id must differ from the current run."; exit 1; fi
+          RUN_JSON="$(gh api "repos/$REPO/actions/runs/$PREPARE_RUN_ID" --jq '{event: .event, status: .status, conclusion: .conclusion, path: .path, name: .name, head_sha: .head_sha, head_branch: .head_branch, head_repo: .head_repository.full_name, run_attempt: .run_attempt}')"
+          EVENT="$(printf '%s' "$RUN_JSON" | jq -r '.event')"
+          STATUS="$(printf '%s' "$RUN_JSON" | jq -r '.status')"
+          CONCLUSION="$(printf '%s' "$RUN_JSON" | jq -r '.conclusion')"
+          RUN_PATH="$(printf '%s' "$RUN_JSON" | jq -r '.path')"
+          HEAD_SHA="$(printf '%s' "$RUN_JSON" | jq -r '.head_sha')"
+          HEAD_BRANCH="$(printf '%s' "$RUN_JSON" | jq -r '.head_branch')"
+          HEAD_REPO="$(printf '%s' "$RUN_JSON" | jq -r '.head_repo')"
+          RUN_ATTEMPT="$(printf '%s' "$RUN_JSON" | jq -r '.run_attempt')"
+          if [ "$EVENT" != "workflow_dispatch" ]; then echo "::error::prepare run must be a workflow_dispatch run."; exit 1; fi
+          if [ "$STATUS" != "completed" ] || [ "$CONCLUSION" != "success" ]; then echo "::error::prepare run must be completed with success."; exit 1; fi
+          if [ "$RUN_PATH" != "$EXPECTED_PATH" ]; then echo "::error::prepare run must come from this release.yml workflow."; exit 1; fi
+          if [ "$HEAD_REPO" != "$REPO" ]; then echo "::error::prepare run must come from this same repository (no forks)."; exit 1; fi
+          if [ "$HEAD_SHA" != "$SOURCE_SHA" ]; then echo "::error::prepare run head SHA does not match the QA-attested source commit."; exit 1; fi
+          if [ "$HEAD_BRANCH" != "$SOURCE_BRANCH" ]; then echo "::error::prepare run head branch does not match the QA-attested source branch."; exit 1; fi
+          echo "Prepare run identity confirmed (attempt $RUN_ATTEMPT). Byte binding is by digest recheck below."
+
+      - name: Download only the candidate from the validated run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          ARTIFACT_NAME: release-candidate
+          DOWNLOAD_DIR: dist
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOWNLOAD_DIR"
+          gh run download "$PREPARE_RUN_ID" --repo "$REPO" -n "$ARTIFACT_NAME" -D "$DOWNLOAD_DIR"
+          echo "Candidate downloaded."
+
+      - name: Recheck both hashes and proof metadata against QA attestation
+        env:
+          CANDIDATE_DIR: dist
+          INPUT_VERSION: ${{ inputs.version }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          EXPECTED_SHA512: ${{ inputs.expected_sha512 }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: node .github/scripts/validate-release-policy.mjs recheck
+
+      - name: Require npm with OIDC trusted publishing support (fail closed, no upgrade)
+        # Node 24.12.0 ships npm 11.6.2 (observed), which already qualifies.
+        # A drifted older runner fails closed; no global upgrade is attempted
+        # in the mint-token job.
+        run: |
+          set -euo pipefail
           CURRENT="$(npm --version)"
           echo "Runner npm version: $CURRENT (need >= 11.5.1)"
-          if node -e "const [maj, min, pat] = '$CURRENT'.split('.').map(Number); process.exit(maj > 11 || (maj === 11 && (min > 5 || (min === 5 && pat >= 1))) ? 0 : 1)"; then
-            echo "Runner npm qualifies; no upgrade needed."
+          if node -e "const p = process.argv[1].split('.').map(Number); process.exit(p[0] > 11 || (p[0] === 11 && (p[1] > 5 || (p[1] === 5 && p[2] >= 1))) ? 0 : 1)" "$CURRENT"; then
+            echo "Runner npm qualifies."
           else
-            echo "Upgrading to pinned npm@11.6.2 for OIDC support."
-            npm install -g "npm@11.6.2"
-            npm --version
+            echo "::error::Runner npm is too old for OIDC trusted publishing (>= 11.5.1 required). Failing closed; no upgrade attempted."
+            exit 1
           fi
-
-      - name: Download release tarball
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: opencode-spotify-${{ inputs.version }}
-          path: dist
-
-      - name: Download release digest sidecars
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: opencode-spotify-${{ inputs.version }}-digests
-          path: dist
-
-      - name: Verify tarball digest and integrity
-        shell: bash
-        working-directory: dist
-        run: |
-          sha256sum -c "opencode-spotify-${{ inputs.version }}.tgz.sha256"
-          node -e "const fs=require('fs');const crypto=require('crypto');const f='opencode-spotify-${{ inputs.version }}.tgz';const want=fs.readFileSync(f+'.integrity','utf8').trim();const got='sha512-'+crypto.createHash('sha512').update(fs.readFileSync(f)).digest('base64');if(got!==want){console.error('integrity mismatch');process.exit(1)}console.log('integrity ok')"
 
       - name: Require an existing npm package (OIDC cannot bootstrap)
-        shell: bash
+        env:
+          PACKAGE_NAME: opencode-spotify
+          NPM_REGISTRY: https://registry.npmjs.org
         run: |
-          if ! npm view opencode-spotify name >/dev/null 2>&1; then
-            echo "::error::The npm package opencode-spotify does not exist. The first publish must be performed manually with npm login + 2FA; OIDC trusted publishing can only be configured after the package exists."
-            exit 1
+          set -euo pipefail
+          OUTPUT="$(npm view "$PACKAGE_NAME" name --registry="$NPM_REGISTRY" 2>&1)" && STATUS=0 || STATUS=$?
+          if [ "$STATUS" -eq 0 ]; then
+            echo "Package exists on the registry; OIDC publish is possible."
+            exit 0
           fi
+          case "$OUTPUT" in
+            *E404*|*"404 Not Found"*)
+              echo "::error::The npm package opencode-spotify does not exist (registry 404). The first publish must be performed manually with npm login + 2FA; OIDC trusted publishing can only be configured after the package exists."
+              exit 1;;
+            *)
+              echo "::error::Could not verify package existence (auth/network/registry error); failing closed without claiming the package is missing. Registry output:"
+              printf '%s\n' "$OUTPUT" | head -n 20
+              exit 1;;
+          esac
 
       - name: Guard against duplicate version
-        shell: bash
+        env:
+          PACKAGE_NAME: opencode-spotify
+          NPM_REGISTRY: https://registry.npmjs.org
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          set +e
-          OUTPUT="$(npm view "opencode-spotify@${{ inputs.version }}" version 2>&1)"
-          STATUS=$?
-          set -e
+          set -euo pipefail
+          OUTPUT="$(npm view "$PACKAGE_NAME@$INPUT_VERSION" version --registry="$NPM_REGISTRY" 2>&1)" && STATUS=0 || STATUS=$?
           if [ "$STATUS" -eq 0 ]; then
-            echo "::error::opencode-spotify@${{ inputs.version }} is already published. Bump the version first."
+            echo "::error::opencode-spotify@$INPUT_VERSION is already published. Bump the version first."
             exit 1
           fi
-          if echo "$OUTPUT" | grep -q "E404\|404 Not Found"; then
-            echo "Version opencode-spotify@${{ inputs.version }} is not on the registry; safe to publish."
-          else
-            echo "::error::Could not prove the version is unpublished (registry/auth failure): $OUTPUT"
-            exit 1
-          fi
+          case "$OUTPUT" in
+            *E404*|*"404 Not Found"*) echo "Version opencode-spotify@$INPUT_VERSION is not on the registry; safe to publish.";;
+            *) echo "::error::Could not prove the version is unpublished (registry/auth failure); failing closed."; printf '%s\n' "$OUTPUT" | head -n 20; exit 1;;
+          esac
+
+      - name: Preflight selected dist-tag monotonicity (strict SemVer)
+        # Refuses to move the selected tag backwards (prerelease precedence
+        # per semver.org item 11). A missing tag (first use) allows. A failed
+        # registry read fails closed.
+        env:
+          PACKAGE_NAME: opencode-spotify
+          NPM_REGISTRY: https://registry.npmjs.org
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          TAGS_JSON="$(npm view "$PACKAGE_NAME" dist-tags --json --registry="$NPM_REGISTRY" 2>/dev/null)" || { echo "::error::Could not read dist-tags from the registry; failing closed."; exit 1; }
+          CURRENT_TAG="$(printf '%s' "$TAGS_JSON" | jq -r --arg tag "$INPUT_DIST_TAG" '.[$tag] // empty')"
+          SAFE_TAG="$(printf '%s' "$INPUT_DIST_TAG" | tr -d '\r\n' | head -c 50)"
+          SAFE_CURRENT="$(printf '%s' "$CURRENT_TAG" | tr -d '\r\n' | head -c 100)"
+          echo "Selected dist-tag '$SAFE_TAG' currently points at: '${SAFE_CURRENT:-<missing>}'"
+          CURRENT_TAG="$CURRENT_TAG" INPUT_VERSION="$INPUT_VERSION" INPUT_DIST_TAG="$INPUT_DIST_TAG" node .github/scripts/validate-release-policy.mjs tag-preflight
+
+      - name: Recheck candidate immediately before publish (no swap after preflights)
+        env:
+          CANDIDATE_DIR: dist
+          INPUT_VERSION: ${{ inputs.version }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          EXPECTED_SHA512: ${{ inputs.expected_sha512 }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: node .github/scripts/validate-release-policy.mjs recheck
 
       - name: Publish the exact verified tarball
-        shell: bash
-        working-directory: dist
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+          DOWNLOAD_DIR: dist
+          NPM_REGISTRY: https://registry.npmjs.org
         # OIDC trusted publishing: no NPM_TOKEN. Requires npm >= 11.5.1
         # (provided by setup-node's bundled npm) and a trusted publisher
         # configured on the npm package. npm authenticates via the
         # id-token permission granted to this job only. Provenance is omitted
         # while the GitHub repository is private (npm does not support it).
-        run: npm publish "./opencode-spotify-${{ inputs.version }}.tgz" --tag "${{ inputs.dist_tag }}" --access public
+        # --ignore-scripts guarantees no lifecycle script from the downloaded
+        # bytes executes during publish.
+        run: |
+          set -euo pipefail
+          TGZ="$DOWNLOAD_DIR/opencode-spotify-$INPUT_VERSION.tgz"
+          if [ ! -f "$TGZ" ]; then echo "::error::Candidate tarball is missing."; exit 1; fi
+          npm publish "./$TGZ" --tag "$INPUT_DIST_TAG" --access public --registry="$NPM_REGISTRY" --ignore-scripts
+
+      - name: Verify registry integrity and intended tag
+        env:
+          PACKAGE_NAME: opencode-spotify
+          NPM_REGISTRY: https://registry.npmjs.org
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+          EXPECTED_SHA512: ${{ inputs.expected_sha512 }}
+        run: |
+          set -euo pipefail
+          REG_INTEGRITY="$(npm view "$PACKAGE_NAME@$INPUT_VERSION" dist.integrity --json --registry="$NPM_REGISTRY" 2>/dev/null | jq -r '.')"
+          if [ "$REG_INTEGRITY" != "$EXPECTED_SHA512" ]; then echo "::error::Registry integrity does not match the published candidate."; exit 1; fi
+          REG_TAG="$(npm view "$PACKAGE_NAME" "dist-tags.$INPUT_DIST_TAG" --registry="$NPM_REGISTRY" 2>/dev/null | tail -n 1 | tr -d ' \r\n')"
+          if [ "$REG_TAG" != "$INPUT_VERSION" ]; then echo "::error::Registry dist-tag does not point at the published version."; exit 1; fi
+          echo "Registry verification passed."

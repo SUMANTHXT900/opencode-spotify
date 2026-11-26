@@ -11,7 +11,6 @@ import {
 import { OPERATION_TIMEOUTS } from "../src/cli/runtime.ts"
 import { resolveChannelLabels } from "../src/cli/status.ts"
 import { applyBridge } from "../src/cli/bridge.ts"
-import { refreshWingetSource, wingetLatestVersion } from "../src/cli/spicetify.ts"
 import { shortConnectionLabel, connectionHint } from "../src/services/state.ts"
 import { executePlan, planExitCode } from "../src/cli/plan.ts"
 import { findProjectPluginConflict } from "../src/cli/plan.ts"
@@ -203,29 +202,8 @@ test("project-local conflict is detected and never edited by the installer", asy
   assert.ok(conflict?.source.includes("C:\\dev"))
 })
 
-// B14–B18: winget source refresh and upstream vs winget mismatch are observable.
-test("winget source refresh and version resolution are best-effort and argv-safe", async () => {
-  const seen: string[][] = []
-  const runtime = fakeBase({
-    async run(file: string, args: string[]) {
-      seen.push([file, ...args])
-      if (args[0] === "source") return { code: 0, stdout: "refreshed", stderr: "" }
-      if (args[0] === "show") return { code: 0, stdout: "Version: 2.47.0\n", stderr: "" }
-      return { code: 0, stdout: "", stderr: "" }
-    },
-    async which(name: string) { return name === "winget" ? "C:\\winget.exe" : undefined },
-  } as unknown as Partial<Runtime>)
-  const refreshed = await refreshWingetSource(runtime)
-  assert.equal(refreshed.code, 0)
-  assert.ok(seen.some((call) => call.includes("source") && call.includes("winget")))
-  const version = await wingetLatestVersion(runtime)
-  assert.equal(version, "2.47.0")
-
-  const missing = fakeBase({
-    async which() { return undefined },
-  } as unknown as Partial<Runtime>)
-  assert.equal(await wingetLatestVersion(missing), null)
-})
+// B14–B18 retired: Winget-first flow replaced by the pinned official installer
+// (see cli-official-installer.test.ts). No Winget source/version unit here.
 
 // Cancellation and partial completion report completed/pending/skipped accurately.
 test("cancelled and failed plans report completed, failed, and skipped stages", async () => {
@@ -256,14 +234,35 @@ test("cancelled and failed plans report completed, failed, and skipped stages", 
 })
 
 // Packed-package and dependency compatibility invariants.
-test("packed artifact keeps host-provided TUI deps optional and the bridge unprovisioned", async () => {
+//
+// B19 correction (loader verdict, on-disk SDK/host code): the host does NOT
+// inject @opentui/* or solid-js into TUI module scope. Bare specifiers in the
+// TUI resolve via normal importer-relative resolution, i.e. from the
+// plugin's own node_modules. Beta.1 worked only because non-optional peers
+// are auto-installed by npm; beta.2's optional peers were skipped in consumer
+// installs, so the TUI died on its first OpenTUI import (src/ui/colors.ts:1)
+// while the server (which never imports OpenTUI) kept loading. The packed
+// tree MUST therefore resolve @opentui/core, @opentui/solid and solid-js from
+// its own installed dependencies — exact pins, never optional peers.
+test("packed artifact carries its own TUI runtime deps and the bridge unprovisioned", async () => {
   const { readFileSync } = await import("node:fs")
   const { fileURLToPath } = await import("node:url")
   const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"))
-  assert.equal(manifest.version, "0.6.0-beta.2")
-  assert.equal(manifest.peerDependenciesMeta?.["@opentui/core"]?.optional, true)
-  assert.equal(manifest.peerDependenciesMeta?.["@opentui/solid"]?.optional, true)
-  assert.ok(!manifest.dependencies?.["@opentui/core"], "host-provided TUI must not be a runtime dependency")
+  assert.equal(manifest.version, "0.6.0-beta.3")
+  // Policy-based (no hard-coded renderer versions) so scratch candidates
+  // with exact newer pins pass: exact shape, matching core/solid pair, hard
+  // deps only. The beta.2 failure modes (optional peer, ^ range, core/solid
+  // mismatch) still fail.
+  for (const dep of ["@opentui/core", "@opentui/solid", "solid-js"]) {
+    const pin = manifest.dependencies?.[dep]
+    assert.match(String(pin ?? ""), /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/,
+      `${dep} must be pinned exact in dependencies (got ${JSON.stringify(pin)})`)
+    assert.ok(!manifest.peerDependencies?.[dep], "TUI runtime must not be a peer (optional or otherwise)")
+    assert.ok(!manifest.peerDependenciesMeta?.[dep], "no optional-peer fiction for the TUI runtime")
+    assert.ok(!manifest.optionalDependencies?.[dep], "TUI runtime must not be optional")
+  }
+  assert.equal(manifest.dependencies?.["@opentui/core"], manifest.dependencies?.["@opentui/solid"],
+    "@opentui/core and @opentui/solid must stay a matching pair")
   const bridge = readFileSync(fileURLToPath(new URL("../spicetify/opencode-spotify-bridge.js", import.meta.url)), "utf8")
   assert.ok(bridge.includes("__OPENCODE_SPOTIFY_SECRET__"))
   // Only the two documented Spotify persisted-query hashes may appear; any
@@ -384,10 +383,14 @@ test("spicetify-only update synchronizes and applies the bridge", async () => {
   })
   ctx.detection = fakeDetection(runtime)
   ctx.versions.plugin.latest = "0.6.0-beta.2"
-  ctx.versions.spicetify.latest = "2.47.0"
+  // The installed CLI is already the approved stable target, so this test stays
+  // about bridge synchronization rather than the (interactive) official upgrade.
+  ctx.versions.spicetify.latest = "2.46.7"
   assert.equal(await runUpdate(ctx, "spicetify"), 0, ui.lines.join("\n"))
   const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
-  assert.ok(commands.some((command) => command.includes("upgrade")), "Spicetify upgraded")
+  // Owner-safe route: never the unverified self-updater.
+  assert.ok(!commands.some((command) => command === "C:\\Users\\Test\\AppData\\Local\\spicetify\\spicetify.exe upgrade"),
+    "spicetify-only update must not invoke spicetify.exe upgrade")
   assert.ok(commands.some((command) => command.includes("install-extension.ps1")), "bridge synchronized")
   assert.ok(commands.some((command) => command === "C:\\spicetify.exe apply" || command.endsWith(" apply")), "apply ran after sync")
   assert.ok(ui.lines.join("\n").includes("synchronized and applied"))

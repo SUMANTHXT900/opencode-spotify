@@ -2,8 +2,8 @@
 
 ## Summary
 
-- Scope (B01–B18 / player / CI / docs):
-- Automated evidence (`typecheck`, `test:fast` or full `test`, render/pack gates):
+- Scope (player / installer / docs / CI):
+- Automated evidence (`typecheck`, `npm test`, native and package gates as applicable):
 
 ## Checklist
 

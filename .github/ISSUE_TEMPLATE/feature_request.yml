@@ -5,7 +5,7 @@ body:
     id: problem
     attributes:
       label: Problem and scope
-      description: Which requirement (B01–B18) or player area this affects
+      description: Which player area or installer behavior this affects
     validations:
       required: true
   - type: textarea

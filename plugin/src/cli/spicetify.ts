@@ -1,9 +1,16 @@
 // V0.6.0 Spicetify inspection and maintenance.
 // Read-only inspection must never modify the system or print secrets.
 // All child processes use argv arrays via Runtime.run (shell:false).
+import { readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { MIN_SPICETIFY, parseVersion } from "./compat.ts";
-import { OPERATION_TIMEOUTS } from "./runtime.ts";
+import {
+  MIN_SPICETIFY,
+  OFFICIAL_INSTALLER_COMMIT,
+  OFFICIAL_INSTALLER_SHA256,
+  parseVersion,
+} from "./compat.ts";
+import { OPERATION_TIMEOUTS, sanitizeDetail } from "./runtime.ts";
+import type { CancelToken } from "./cancel.ts";
 import type { CommandResult, Logger, Runtime, SpicetifyInfo, SpotifyInfo } from "./types.ts";
 
 /** Fixed Store/Appx query. This constant must never include user input. */
@@ -15,29 +22,24 @@ export const SPICETIFY_BRIDGE_FILE = "opencode-spotify-bridge.js";
 
 /** Official manual installation reference (display only; never executed automatically). */
 export const SPICETIFY_MANUAL_URL = "https://spicetify.app/docs/getting-started";
+/** Published release page used when no concrete target is resolved. */
+export const SPICETIFY_RELEASES_PAGE = "https://github.com/spicetify/cli/releases";
 
-export interface InstallApproval {
-  method: "winget";
-  command: string;
-  source: string;
+/** Strict stable version (no prerelease/build suffix), or null. */
+function strictStableVersion(value: string | null | undefined): string | null {
+  const trimmed = (value ?? "").trim().replace(/^v/i, "");
+  return /^\d+\.\d+\.\d+$/.test(trimmed) ? trimmed : null;
 }
 
-export interface InstallOptions {
-  dryRun: boolean;
-  approve: (details: InstallApproval) => Promise<boolean>;
-  log?: Logger;
-}
-
-export interface UpgradeApproval {
-  method: string;
-  command: string;
-  source: string;
-}
-
-export interface UpgradeOptions {
-  approve: (details: UpgradeApproval) => Promise<boolean>;
-  dryRun?: boolean;
-  log?: Logger;
+/** Cancellation never kills an in-flight child here; it only prevents a start. */
+function cancelledResult(scope: string): CommandResult {
+  return {
+    code: 130,
+    stdout: "",
+    stderr: "",
+    cancelled: true,
+    error: `Cancelled by the user before ${scope}; nothing was started.`,
+  };
 }
 
 function lastNonEmptyLine(output: string): string | null {
@@ -86,10 +88,14 @@ function parseBridgeRegistration(text: string): boolean | "ambiguous" {
 }
 
 async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<SpicetifyInfo["owner"]> {
-  const lower = spicetifyExe.toLowerCase();
-  if (lower.includes("scoop")) return "scoop";
-  if (lower.includes("chocolatey") || lower.includes("choco")) return "choco";
-  if (lower.includes("winget")) return "winget";
+  // Manager ownership requires the manager's own directory layout. A plain
+  // substring test would misclassify any profile such as C:\Users\scoop\... .
+  const joined = `\\${spicetifyExe.toLowerCase().split(/[\\/]+/).filter(Boolean).join("\\")}\\`;
+  if (joined.includes("\\scoop\\apps\\") || joined.includes("\\scoop\\shims\\")) return "scoop";
+  if (joined.includes("\\chocolatey\\bin\\") || joined.includes("\\chocolatey\\lib\\")) return "choco";
+  if (joined.includes("\\microsoft\\winget\\packages\\") ||
+    joined.includes("\\microsoft\\winget\\links\\") ||
+    joined.includes("\\winget\\links\\")) return "winget";
   // Bounded manager probes. All argv arrays, no shell strings.
   try {
     const winget = await runtime.which("winget");
@@ -108,7 +114,7 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
     const scoop = await runtime.which("scoop");
     if (scoop) {
       try {
-        const result = await runtime.run(scoop, ["list", "spicetify"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
+        const result = await runtime.run(scoop, ["list", "spicetify-cli"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
         if (result.code === 0 && /spicetify/i.test(result.stdout)) return "scoop";
       } catch { /* ignore */ }
     }
@@ -119,18 +125,27 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
       try {
         const result = await runtime.run(
           choco,
-          ["list", "spicetify", "--local-only"],
+          ["list", "spicetify-cli", "--local-only"],
           { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect },
         );
         if (result.code === 0 && /spicetify/i.test(result.stdout)) return "choco";
       } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
-  const localLower = localAppDataDir(runtime).toLowerCase();
-  if (lower.startsWith(localLower) && lower.includes("spicetify")) return "script";
+  // A script-owned copy must sit in the canonical %LOCALAPPDATA%\spicetify
+  // directory. Other local paths (e.g. %LOCALAPPDATA%\Programs\spicetify)
+  // are not ours to upgrade or delete.
+  const canonicalScriptDir = stripTrailingSep(localAppDataDir(runtime)).toLowerCase() + "\\spicetify";
+  try {
+    if (stripTrailingSep(dirname(spicetifyExe)).toLowerCase() === canonicalScriptDir) return "script";
+  } catch { /* unparseable path stays unknown */ }
   // Keep MIN_SPICETIFY referenced so version policy stays shared.
   void MIN_SPICETIFY;
   return "unknown";
+}
+
+function stripTrailingSep(value: string): string {
+  return value.replace(/[\\/]+$/, "");
 }
 
 /**
@@ -351,19 +366,6 @@ export async function inspectSpicetify(runtime: Runtime): Promise<SpicetifyInfo>
   };
 }
 
-function wingetInstallArgs(): string[] {
-  return [
-    "install",
-    "--id",
-    SPICETIFY_WINGET_ID,
-    "-e",
-    "--source",
-    "winget",
-    "--accept-package-agreements",
-    "--accept-source-agreements",
-  ];
-}
-
 function wingetUpgradeArgs(): string[] {
   return [
     "upgrade",
@@ -377,119 +379,121 @@ function wingetUpgradeArgs(): string[] {
   ];
 }
 
-/**
- * Install Spicetify via winget only. A checksum of a mutable branch-tip
- * script cannot authenticate it, so the unsigned upstream installer is never
- * downloaded or executed automatically: without winget the caller is directed
- * to the official manual instructions. Never runs without approval. Dry-run
- * plans without executing.
- */
-export async function installSpicetify(
-  runtime: Runtime,
-  info: SpicetifyInfo,
-  opts: InstallOptions,
-): Promise<CommandResult> {
-  if (info.available) {
-    return { code: 0, stdout: "Spicetify is already installed.", stderr: "" };
-  }
+export interface ManagerUpgradeApproval {
+  method: "winget" | "scoop" | "choco";
+  command: string;
+  source: string;
+}
 
-  const winget = await runtime.which("winget").catch(() => undefined);
-  if (!winget) {
-    return {
-      code: 1,
-      stdout: "",
-      stderr: "",
-      error: `Automatic installation requires winget (${SPICETIFY_WINGET_ID}). Install Spicetify manually from ${SPICETIFY_MANUAL_URL}, then re-run setup and choose recheck.`,
-    };
-  }
-  const command = `winget install --id ${SPICETIFY_WINGET_ID} -e --source winget --accept-package-agreements --accept-source-agreements`;
-  if (opts.dryRun) {
-    return { code: 0, stdout: `Would run: ${command}`, stderr: "" };
-  }
-  const details: InstallApproval = {
-    method: "winget",
-    command,
-    source: `winget (pinned source): ${SPICETIFY_WINGET_ID}`,
-  };
-  opts.log?.out(`Spicetify install: ${details.command}`);
-  opts.log?.out(`Source: ${details.source}`);
-  const approved = await opts.approve(details);
-  if (!approved) {
-    return { code: 1, stdout: "", stderr: "", error: "Spicetify installation declined." };
-  }
-  const result = await runtime.run(winget, wingetInstallArgs(), { timeoutMs: OPERATION_TIMEOUTS.packageInstall });
-  // Re-detect after the attempt (read-only, never throws).
-  try {
-    await inspectSpicetify(runtime);
-  } catch {
-    // Detection failure does not mask the install result.
-  }
-  return result;
+export interface ManagerUpgradeOptions {
+  dryRun?: boolean;
+  approve?: (details: ManagerUpgradeApproval) => Promise<boolean>;
+  log?: Logger;
+  /** Cooperative cancellation: checked before approval and before the child starts. */
+  cancel?: CancelToken;
 }
 
 /**
- * Upgrade Spicetify using the owner-specific command. Never downgrades;
- * unknown owners are refused. Approval is always required.
+ * Owner-specific upgrade for manager installs. The official installer adapter
+ * dispatches here for winget/scoop/choco; those copies are never overlaid by
+ * the portable installer, and `spicetify update` is never invoked.
+ * Script-owned upgrades go through the official installer instead.
  */
-export async function upgradeSpicetify(
+export async function upgradeSpicetifyWithManager(
   runtime: Runtime,
   info: SpicetifyInfo,
-  opts: UpgradeOptions,
+  opts: ManagerUpgradeOptions,
 ): Promise<CommandResult> {
   if (!info.available || !info.path) {
     return { code: 1, stdout: "", stderr: "", error: "Spicetify is not installed." };
   }
-  if (info.owner === "unknown") {
+  const owner = info.owner;
+  if (owner !== "winget" && owner !== "scoop" && owner !== "choco") {
     return {
       code: 1,
       stdout: "",
       stderr: "",
-      error: "Unknown Spicetify install owner; refusing to upgrade.",
+      error: `Manager upgrade only applies to winget/scoop/Chocolatey installations; this copy is ${owner === "script" ? "owned by the official installer" : `owned by ${owner}`}.`,
     };
   }
 
-  let file: string;
-  let args: string[];
-  let source: string;
-  if (info.owner === "winget") {
-    file = (await runtime.which("winget").catch(() => undefined)) ?? "winget";
-    args = wingetUpgradeArgs();
-    source = `winget: ${SPICETIFY_WINGET_ID}`;
-  } else if (info.owner === "scoop") {
-    file = (await runtime.which("scoop").catch(() => undefined)) ?? "scoop";
-    args = ["update", "spicetify"];
-    source = "scoop: spicetify";
-  } else if (info.owner === "choco") {
-    file = (await runtime.which("choco").catch(() => undefined)) ?? "choco";
-    args = ["upgrade", "spicetify", "-y"];
-    source = "chocolatey: spicetify";
-  } else {
-    file = info.path;
-    args = ["upgrade"];
-    source = "spicetify: upgrade";
-  }
-  const command = `${file} ${args.join(" ")}`;
+  const spec = owner === "winget"
+    ? {
+        binary: "winget",
+        args: wingetUpgradeArgs(),
+        source: `winget: ${SPICETIFY_WINGET_ID}`,
+        guidance: `winget upgrade --id ${SPICETIFY_WINGET_ID} -e`,
+      }
+    : owner === "scoop"
+      ? {
+          binary: "scoop",
+          args: ["update", "spicetify-cli"],
+          source: "scoop: spicetify-cli",
+          guidance: "scoop update spicetify-cli",
+        }
+      : {
+          binary: "choco",
+          args: ["upgrade", "spicetify-cli", "-y"],
+          source: "chocolatey: spicetify-cli",
+          guidance: "choco upgrade spicetify-cli -y",
+        };
+
+  const command = `${spec.binary} ${spec.args.join(" ")}`;
+  if (opts.cancel?.requested) return cancelledResult("the Spicetify upgrade");
   if (opts.dryRun) {
     return { code: 0, stdout: `Would run: ${command}`, stderr: "" };
   }
-  const details: UpgradeApproval = { method: info.owner, command, source };
-  opts.log?.out(`Spicetify upgrade: ${command}`);
-  opts.log?.out(`Source: ${source}`);
-  const approved = await opts.approve(details);
+  const file = await runtime.which(spec.binary).catch(() => undefined);
+  if (!file) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: "",
+      error: `${spec.binary} was not found on PATH; update this ${owner}-owned Spicetify manually (${spec.guidance}) or reinstall it with ${owner}.`,
+    };
+  }
+  if (!opts.approve) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: "",
+      error: "Spicetify upgrade requires explicit approval; no approval handler was provided.",
+    };
+  }
+  if (opts.cancel?.requested) return cancelledResult("the Spicetify upgrade");
+  const resolvedCommand = `${file} ${spec.args.join(" ")}`;
+  opts.log?.out(`Spicetify upgrade: ${resolvedCommand}`);
+  opts.log?.out(`Source: ${spec.source}`);
+  let approved = false;
+  try {
+    approved = await opts.approve({ method: owner, command: resolvedCommand, source: spec.source });
+  } catch {
+    approved = false;
+  }
   if (!approved) {
     return { code: 1, stdout: "", stderr: "", error: "Spicetify upgrade declined." };
   }
-  return runtime.run(file, args, { timeoutMs: OPERATION_TIMEOUTS.packageInstall });
+  // Approval input can take time; re-check before the mutation starts.
+  if (opts.cancel?.requested) return cancelledResult("the Spicetify upgrade");
+  return runtime.run(file, spec.args, {
+    timeoutMs: OPERATION_TIMEOUTS.packageInstall,
+    ...(opts.cancel ? { cancel: opts.cancel } : {}),
+  });
 }
 
 /**
  * Run `spicetify apply`. The caller must have obtained approval already;
  * this function never prompts and never runs without `approved === true`.
+ *
+ * Cancellation is checked before the child starts only. Once apply runs it is
+ * protected: it is never interrupted between start and verification, because a
+ * half-applied Spotify cannot be reliably rolled back.
  */
 export async function applySpicetify(
   runtime: Runtime,
   path: string | null | undefined,
   approved: boolean,
+  options: { cancel?: CancelToken } = {},
 ): Promise<CommandResult> {
   if (!approved) {
     return {
@@ -499,96 +503,476 @@ export async function applySpicetify(
       error: "Spicetify apply requires explicit approval.",
     };
   }
+  if (options.cancel?.requested) return cancelledResult("spicetify apply");
   const exe = path ?? (await runtime.which("spicetify").catch(() => undefined)) ?? "spicetify";
-  return runtime.run(exe, ["apply"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyApply });
+  return runtime.run(exe, ["apply"], {
+    timeoutMs: OPERATION_TIMEOUTS.spicetifyApply,
+    ...(options.cancel ? { cancel: options.cancel } : {}),
+  });
 }
 
 /**
- * Best-effort backup-state detection (B09). `spicetify apply` on a fresh
- * install fails when no initial Spotify backup exists; overwriting a valid
- * backup is wasteful. We probe the well-known backup locations without
- * modifying anything (`%LOCALAPPDATA%/spicetify|Spicetify/Backup`).
+ * B09/E26: Spicetify v2.x keeps its state (config, Backup, Themes, Extensions,
+ * Marketplace and CustomApps) under `%APPDATA%\\spicetify`, not
+ * `%LOCALAPPDATA%`. The local directory only holds the program binary.
  *
- * Returns "ready" when a backup directory exists, "missing" when neither
- * candidate exists, and "unknown" when it cannot be determined. Note: the
- * Runtime contract exposes existence only, so an empty/partial/stale backup
- * still reports "ready" here — the apply path compensates by retrying once
- * on backup-related apply errors (see bridge.ts applyBridge). Never throws.
+ * Restore is safe only when the backup directory exists AND contains
+ * `xpui.spa` plus `login.spa` at plausible sizes. Directory existence alone is
+ * never enough: an empty or truncated backup must block `spicetify restore`.
+ */
+export const SPICETIFY_BACKUP_FILES = ["xpui.spa", "login.spa"] as const;
+
+/** Broad, release-independent size bounds that reject empty/truncated copies. */
+export const SPICETIFY_BACKUP_SIZE_RANGE: Record<
+  (typeof SPICETIFY_BACKUP_FILES)[number],
+  { min: number; max: number }
+> = {
+  "xpui.spa": { min: 1_000_000, max: 128 * 1024 * 1024 },
+  "login.spa": { min: 100_000, max: 64 * 1024 * 1024 },
+};
+
+export interface BackupFileProbe {
+  name: (typeof SPICETIFY_BACKUP_FILES)[number];
+  path: string;
+  exists: boolean;
+  size: number | null;
+  plausible: boolean;
+}
+
+export interface SpicetifyBackupInspection {
+  state: "ready" | "missing" | "unknown";
+  backupDir: string | null;
+  files: BackupFileProbe[];
+  error?: string;
+}
+
+export interface BackupProbeDeps {
+  /** File size probe; return null when it cannot be determined. */
+  fileSize?: (path: string) => number | null;
+  /** Directory listing; return null when it cannot be read. */
+  listDir?: (path: string) => string[] | null;
+}
+
+/** Optional test/runtime hooks. Production Runtime does not implement these. */
+interface BackupRuntimeProbes {
+  fileSize?: (path: string) => number | null;
+  listDir?: (path: string) => string[] | null;
+}
+
+function defaultBackupFileSize(path: string): number | null {
+  try {
+    return statSync(path).size;
+  } catch {
+    return null;
+  }
+}
+
+function defaultListDir(path: string): string[] | null {
+  try {
+    return readdirSync(path);
+  } catch {
+    return null;
+  }
+}
+
+export function spicetifyStateDir(
+  runtime: Runtime,
+  spicetify?: Pick<SpicetifyInfo, "configPath"> | null,
+): string {
+  if (spicetify?.configPath) {
+    try {
+      return dirname(spicetify.configPath);
+    } catch {
+      // Fall through to the documented roaming default.
+    }
+  }
+  return join(appDataDir(runtime), "spicetify");
+}
+
+/** Ordered candidates: configured state root, roaming default, then legacy local roots. */
+export function spicetifyBackupCandidates(
+  runtime: Runtime,
+  spicetify?: Pick<SpicetifyInfo, "configPath"> | null,
+): string[] {
+  const candidates = [
+    join(spicetifyStateDir(runtime, spicetify), "Backup"),
+    join(appDataDir(runtime), "spicetify", "Backup"),
+    join(localAppDataDir(runtime), "spicetify", "Backup"),
+    join(localAppDataDir(runtime), "Spicetify", "Backup"),
+  ];
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = candidate.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Detailed, fail-closed backup inspection. Returns "ready" only for a
+ * non-empty backup directory with both restore archives at plausible sizes.
+ * An existing but empty/invalid directory is "unknown" (not "missing") so a
+ * caller can never silently skip restore and delete a still-modded Spotify.
+ */
+export async function inspectBackupStateDetailed(
+  runtime: Runtime,
+  spicetify: SpicetifyInfo,
+  deps: BackupProbeDeps = {},
+): Promise<SpicetifyBackupInspection> {
+  const probes = runtime as Runtime & BackupRuntimeProbes;
+  const fileSize = deps.fileSize ?? probes.fileSize ?? defaultBackupFileSize;
+  const listDir = deps.listDir ?? probes.listDir ?? defaultListDir;
+  try {
+    if (!spicetify.available || !spicetify.path) {
+      return { state: "unknown", backupDir: null, files: [], error: "Spicetify is unavailable; backup state cannot be verified." };
+    }
+    // L11: scan every candidate. The first *ready* backup wins; an existing
+    // but invalid candidate is remembered (state "unknown") but must not stop
+    // the scan, because a later candidate may hold the usable backup.
+    let invalid: SpicetifyBackupInspection | null = null;
+    for (const dir of spicetifyBackupCandidates(runtime, spicetify)) {
+      let exists = false;
+      try {
+        exists = runtime.exists(dir);
+      } catch {
+        continue;
+      }
+      if (!exists) continue;
+
+      const entries = listDir(dir);
+      const files: BackupFileProbe[] = SPICETIFY_BACKUP_FILES.map((name) => {
+        const path = join(dir, name);
+        let fileExists: boolean;
+        if (entries) {
+          fileExists = entries.some((entry) => entry.toLowerCase() === name);
+        } else {
+          try {
+            fileExists = runtime.exists(path);
+          } catch {
+            fileExists = false;
+          }
+        }
+        const size = fileExists ? fileSize(path) : null;
+        const range = SPICETIFY_BACKUP_SIZE_RANGE[name];
+        return {
+          name,
+          path,
+          exists: fileExists,
+          size,
+          plausible: size !== null && size >= range.min && size <= range.max,
+        };
+      });
+
+      const nonEmpty = entries ? entries.length > 0 : files.some((file) => file.exists);
+      if (nonEmpty && files.every((file) => file.exists && file.plausible)) {
+        return { state: "ready", backupDir: dir, files };
+      }
+      if (!invalid) {
+        const problems = files
+          .filter((file) => !file.exists || !file.plausible)
+          .map((file) => (file.exists
+            ? `${file.name} is ${file.size ?? "an unknown size"} bytes (expected ${SPICETIFY_BACKUP_SIZE_RANGE[file.name].min}-${SPICETIFY_BACKUP_SIZE_RANGE[file.name].max})`
+            : `${file.name} is missing`))
+          .join("; ");
+        invalid = {
+          state: "unknown",
+          backupDir: dir,
+          files,
+          error: `Backup directory ${dir} ${nonEmpty ? "is untrustworthy" : "is empty"}${problems ? `: ${problems}` : ""}.`,
+        };
+      }
+    }
+    if (invalid) return invalid;
+    return { state: "missing", backupDir: null, files: [], error: "No Spicetify backup directory was found." };
+  } catch (error) {
+    return {
+      state: "unknown",
+      backupDir: null,
+      files: [],
+      error: sanitizeDetail(error instanceof Error ? error.message : "backup inspection failed"),
+    };
+  }
+}
+
+/**
+ * Tri-state compatibility wrapper. "ready" now requires a verifiable backup
+ * payload, not merely directory existence.
  */
 export async function inspectBackupState(
   runtime: Runtime,
   spicetify: SpicetifyInfo,
+  deps: BackupProbeDeps = {},
 ): Promise<"ready" | "missing" | "unknown"> {
+  return (await inspectBackupStateDetailed(runtime, spicetify, deps)).state;
+}
+
+// ---------------------------------------------------------------------------
+// Spotify application files (restore pre/post verification, E26 P0-2).
+// ---------------------------------------------------------------------------
+
+export interface SpotifyAppFileInfo {
+  path: string;
+  exists: boolean;
+  size: number | null;
+  mtimeMs: number | null;
+}
+
+export interface SpotifyAppSnapshot {
+  ok: boolean;
+  appsDir: string | null;
+  files: SpotifyAppFileInfo[];
+  error?: string;
+}
+
+export interface SpotifyAppProbeDeps {
+  fileInfo?: (path: string) => { size: number; mtimeMs: number } | null;
+}
+
+const SPOTIFY_APP_PROBES = [
+  { id: "xpui", name: "xpui-modules.js" },
+  { id: "login", name: "login.js" },
+] as const;
+
+function defaultAppFileInfo(path: string): { size: number; mtimeMs: number } | null {
   try {
-    if (!spicetify.available || !spicetify.path) return "unknown";
-    const localBase = runtime.env.LOCALAPPDATA || join(runtime.homedir, "AppData", "Local");
-    const candidates = [
-      join(localBase, "spicetify", "Backup"),
-      join(localBase, "Spicetify", "Backup"),
-    ];
-    for (const dir of candidates) {
+    const stat = statSync(path);
+    return { size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/** Spotify install directory from config (`spotify_path`) or the roaming default. */
+export function spotifyInstallDir(runtime: Runtime, spicetify: SpicetifyInfo): string | null {
+  try {
+    if (spicetify.configPath && runtime.exists(spicetify.configPath)) {
+      const text = runtime.readText(spicetify.configPath);
+      const match = text.match(/^\s*spotify_path\s*=\s*(.+?)\s*$/mi);
+      if (match?.[1]) return match[1].trim();
+    }
+  } catch {
+    // Fall back to the documented roaming default.
+  }
+  return join(appDataDir(runtime), "Spotify");
+}
+
+export function spotifyAppsDir(runtime: Runtime, spicetify: SpicetifyInfo): string | null {
+  const installDir = spotifyInstallDir(runtime, spicetify);
+  return installDir ? join(installDir, "Apps") : null;
+}
+
+/** Snapshot the two representative Spotify app bundles before/after restore. */
+export function captureSpotifyAppFiles(
+  runtime: Runtime,
+  spicetify: SpicetifyInfo,
+  deps: SpotifyAppProbeDeps = {},
+): SpotifyAppSnapshot {
+  const appsDir = spotifyAppsDir(runtime, spicetify);
+  if (!appsDir) {
+    return { ok: false, appsDir: null, files: [], error: "The Spotify apps directory could not be resolved." };
+  }
+  const fileInfo = deps.fileInfo ?? defaultAppFileInfo;
+  const files: SpotifyAppFileInfo[] = SPOTIFY_APP_PROBES.map((probe) => {
+    const path = join(appsDir, probe.id, probe.name);
+    const info = fileInfo(path);
+    let exists = info !== null;
+    if (!exists) {
       try {
-        if (!runtime.exists(dir)) continue;
-        return "ready";
+        exists = runtime.isFile(path);
       } catch {
-        continue;
+        exists = false;
       }
     }
-    return "missing";
-  } catch {
-    return "unknown";
+    return { path, exists, size: info?.size ?? null, mtimeMs: info?.mtimeMs ?? null };
+  });
+  const ok = files.every((file) => file.exists);
+  return {
+    ok,
+    appsDir,
+    files,
+    ...(ok ? {} : { error: `Missing Spotify app files under ${appsDir}: ${files.filter((file) => !file.exists).map((file) => file.path).join(", ")}` }),
+  };
+}
+
+/**
+ * A restore completed only if the app files still exist and at least one
+ * changed (size or mtime). Identical files mean the restore could not be
+ * evidenced, so the caller must not delete Spicetify data.
+ */
+export function verifySpotifyRestoreApplied(
+  before: SpotifyAppSnapshot,
+  after: SpotifyAppSnapshot,
+): { ok: boolean; changed: string[]; error?: string } {
+  if (!after.ok) {
+    return { ok: false, changed: [], error: after.error ?? "Spotify app files are missing after restore." };
   }
+  const changed = after.files.filter((file) => {
+    const prior = before.files.find((candidate) => candidate.path.toLowerCase() === file.path.toLowerCase());
+    if (!prior || !prior.exists) return true;
+    return prior.size !== file.size || prior.mtimeMs !== file.mtimeMs;
+  }).map((file) => file.path);
+  if (!changed.length) {
+    return {
+      ok: false,
+      changed: [],
+      error: "spicetify restore completed but no Spotify app file changed; restore cannot be verified.",
+    };
+  }
+  return { ok: true, changed };
+}
+
+export interface SpotifyRestoreOptions extends BackupProbeDeps, SpotifyAppProbeDeps {
+  timeoutMs?: number;
+  /** Checked before restore starts; verification afterwards is protected. */
+  cancel?: CancelToken;
+}
+
+/**
+ * Restore Spotify from the verified Spicetify backup. This is the B09
+ * integration point: it refuses to run `spicetify restore` unless the backup
+ * payload is trustworthy, snapshots the app bundles before the command, and
+ * verifies that the app files changed afterwards.
+ */
+export async function restoreSpotifyFromBackup(
+  runtime: Runtime,
+  spicetify: SpicetifyInfo,
+  options: SpotifyRestoreOptions = {},
+): Promise<CommandResult> {
+  if (!spicetify.available || !spicetify.path) {
+    return { code: 1, stdout: "", stderr: "", error: "E_RESTORE_UNAVAILABLE: Spicetify is not installed; Spotify cannot be restored." };
+  }
+  if (options.cancel?.requested) {
+    return {
+      code: 130,
+      stdout: "",
+      stderr: "",
+      cancelled: true,
+      error: "E_CANCELLED: cancelled before spicetify restore; nothing was started.",
+    };
+  }
+  const backup = await inspectBackupStateDetailed(runtime, spicetify, options);
+  if (backup.state !== "ready") {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: "",
+      error: `E_RESTORE_BACKUP_${backup.state.toUpperCase()}: ${backup.error ?? "the Spicetify backup is not trustworthy"}; refusing to run spicetify restore.`,
+    };
+  }
+  // Last stop before the mutation. After this point restore is protected and
+  // must run to verification; no cancellation check happens in between.
+  if (options.cancel?.requested) {
+    return {
+      code: 130,
+      stdout: "",
+      stderr: "",
+      cancelled: true,
+      error: "E_CANCELLED: cancelled before spicetify restore; nothing was started.",
+    };
+  }
+  const before = captureSpotifyAppFiles(runtime, spicetify, options);
+  const result = await runtime.run(spicetify.path, ["restore"], {
+    timeoutMs: options.timeoutMs ?? OPERATION_TIMEOUTS.spicetifyBackup,
+    ...(options.cancel ? { cancel: options.cancel } : {}),
+  });
+  if (result.code !== 0 || result.timedOut) {
+    return {
+      ...result,
+      error: `E_RESTORE_FAILED: spicetify restore ${result.timedOut ? "timed out" : `exited with code ${result.code}`}${result.error ? `: ${sanitizeDetail(result.error)}` : "."}`,
+    };
+  }
+  const after = captureSpotifyAppFiles(runtime, spicetify, options);
+  const verified = verifySpotifyRestoreApplied(before, after);
+  if (!verified.ok) {
+    return {
+      code: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      error: `E_RESTORE_UNVERIFIED: ${verified.error ?? "Spotify app files did not change"}. Nothing Spicetify-owned may be deleted.`,
+    };
+  }
+  return {
+    code: 0,
+    stdout: `Spotify restored from ${backup.backupDir ?? "the Spicetify backup"}; ${verified.changed.length} app file(s) changed.`,
+    stderr: result.stderr ?? "",
+  };
 }
 
 /**
  * Run `spicetify backup` once for a fresh installation (B09). The caller must
  * have approved the surrounding plan; this function never prompts.
+ * Cancellation is checked before the command starts only.
  */
 export async function backupSpicetify(
   runtime: Runtime,
   path: string | null | undefined,
+  options: { cancel?: CancelToken } = {},
 ): Promise<CommandResult> {
+  if (options.cancel?.requested) return cancelledResult("spicetify backup");
   const exe = path ?? (await runtime.which("spicetify").catch(() => undefined)) ?? "spicetify";
-  return runtime.run(exe, ["backup"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup });
-}
-
-/**
- * Refresh the Winget source before resolving the trusted package version
- * (B14–B18). Best-effort and read-only in spirit: `winget source update`
- * only refreshes metadata, never installs anything. Failures are returned,
- * never thrown, so the caller can continue with a stale source + warning.
- */
-export async function refreshWingetSource(runtime: Runtime): Promise<CommandResult> {
-  const winget = await runtime.which("winget").catch(() => undefined);
-  if (!winget) {
-    return { code: 1, stdout: "", stderr: "", error: "winget not found on PATH" };
-  }
-  return runtime.run(winget, ["source", "update", "--name", "winget"], {
-    timeoutMs: OPERATION_TIMEOUTS.managerProbe,
+  return runtime.run(exe, ["backup"], {
+    timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup,
+    ...(options.cancel ? { cancel: options.cancel } : {}),
   });
 }
 
 /**
- * Resolve the latest available Winget version for the pinned trusted package
- * id (B14–B18). Anchors to the `Version:` line of `winget show` output so
- * unrelated version tokens (source/app wrapper text) are not misread.
- * Returns null when it cannot be determined.
+ * Manual-install details for display only (never executed). Rewritten for the
+ * pinned official installer: the old winget-first / direct-release-zip
+ * guidance is gone. The first argument is accepted as a version string or a
+ * structural release object for compatibility with callers that still hold
+ * resolved metadata. Only a resolved strict-stable version is ever printed;
+ * when the release is unknown the releases page is shown instead.
  */
-export async function wingetLatestVersion(runtime: Runtime): Promise<string | null> {
-  try {
-    const winget = await runtime.which("winget").catch(() => undefined);
-    if (!winget) return null;
-    const result = await runtime.run(
-      winget,
-      ["show", "--id", SPICETIFY_WINGET_ID, "-e", "--source", "winget"],
-      { timeoutMs: OPERATION_TIMEOUTS.managerProbe },
-    );
-    if (result.code !== 0) return null;
-    const text = `${result.stdout}\n${result.stderr}`;
-    const anchored = text.match(/^\s*Version\s*:\s*v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s*$/im);
-    if (anchored?.[1]) return anchored[1];
-    return null;
-  } catch {
-    return null;
-  }
+export interface SpicetifyManualDetailsInput {
+  version?: string | null;
+  tagName?: string | null;
+  /** Raw tag on a resolved release object. */
+  tag?: string | null;
+  assetName?: string | null;
+  assetUrl?: string | null;
+  digest?: string | null;
+  expectedSha256?: string | null;
 }
+
+export function spicetifyManualDetails(
+  release?: SpicetifyManualDetailsInput | string | null,
+  arch?: string | null,
+): string {
+  const details: SpicetifyManualDetailsInput =
+    typeof release === "string" ? { version: release } : (release ?? {});
+  const version = strictStableVersion(details.version) ??
+    strictStableVersion(details.tagName) ??
+    strictStableVersion(details.tag);
+  const scriptUrl = `https://raw.githubusercontent.com/spicetify/cli/${OFFICIAL_INSTALLER_COMMIT}/install.ps1`;
+  const lines = [
+    `Docs: ${SPICETIFY_MANUAL_URL}`,
+    `Official installer (pinned revision ${OFFICIAL_INSTALLER_COMMIT.slice(0, 12)}): ${scriptUrl}`,
+    `Pinned installer SHA-256: ${OFFICIAL_INSTALLER_SHA256}`,
+  ];
+  if (version) {
+    lines.push(`Target version: v${version}`);
+    const assetName = details.assetName?.trim() || (arch ? `spicetify-${version}-windows-${arch}.zip` : null);
+    if (assetName) lines.push(`Target asset: ${assetName}`);
+    const assetUrl = details.assetUrl?.trim() ||
+      (arch && assetName ? `https://github.com/spicetify/cli/releases/download/v${version}/${assetName}` : null);
+    if (assetUrl) lines.push(`Asset URL: ${assetUrl}`);
+    const digest = details.digest?.trim() || details.expectedSha256?.trim();
+    if (digest) lines.push(`Expected digest: ${digest}`);
+  } else {
+    lines.push(`Target version: not resolved; choose the current stable release at ${SPICETIFY_RELEASES_PAGE}`);
+  }
+  if (arch) lines.push(`Detected architecture: ${arch}`);
+  lines.push("Verify a downloaded installer before use: Get-FileHash .\\install.ps1 -Algorithm SHA256");
+  lines.push("Run it as your ordinary user (never elevated); the script installs the resolved stable release.");
+  lines.push(`Alternatives: winget install --id ${SPICETIFY_WINGET_ID} -e | scoop install spicetify-cli | choco install spicetify-cli`);
+  lines.push("The Marketplace step and `spicetify update` are never auto-executed by this installer: the Marketplace step is removed from the staged script before it runs.");
+  return lines.join("\n");
+}
+
+// Transitional compatibility surface: the official installer adapter now owns
+// fresh installs and script-owned upgrades. Import directly from
+// ./spicetify-official.ts in new code.
+export { installSpicetify, upgradeSpicetify, spicetifyArchToken } from "./spicetify-official.ts";
+export type { OfficialInstallerApproval, OfficialInstallerOptions } from "./spicetify-official.ts";

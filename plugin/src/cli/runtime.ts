@@ -1,10 +1,12 @@
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { basename, delimiter, join } from "node:path"
+import { basename, delimiter, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { connect } from "node:net"
 import type { CommandResult, ExecOptions, Runtime } from "./types.ts"
+import type { ChildRegistry } from "./children.ts"
+import type { CancelToken } from "./cancel.ts"
 
 const limit = 256 * 1024
 
@@ -56,7 +58,17 @@ function isBatchFile(file: string): boolean {
   return /\.(?:cmd|bat)$/i.test(file)
 }
 
-function capture(file: string, args: string[], options: ExecOptions = {}): Promise<CommandResult> {
+interface RuntimeSignalContext {
+  children?: ChildRegistry
+  cancel?: CancelToken
+}
+
+function capture(
+  file: string,
+  args: string[],
+  options: ExecOptions = {},
+  ctx: RuntimeSignalContext = {},
+): Promise<CommandResult> {
   return new Promise((resolve) => {
     const started = Date.now()
     let command = file
@@ -70,6 +82,43 @@ function capture(file: string, args: string[], options: ExecOptions = {}): Promi
       commandArgs = ["/d", "/s", "/c", `"${cmdline}"`]
     }
     const timeoutMs = options.timeoutMs ?? 15_000
+    const policy = options.killPolicy ?? "tree"
+    const cancel = options.cancel ?? ctx.cancel
+    const registry = ctx.children
+    // Never spawn after a cancellation: callers would otherwise mutate state
+    // (rollback/verify/re-detect) behind the user's back.
+    if (cancel?.requested) {
+      resolve({
+        code: 130,
+        stdout: "",
+        stderr: "",
+        cancelled: true,
+        error: "Cancelled by the user.",
+        durationMs: Date.now() - started,
+      })
+      return
+    }
+    let settled = false
+    let killRequested = false
+    let unsubscribe: (() => void) | undefined
+    const killOnce = () => {
+      if (killRequested || policy === "none" || cancel?.killHeld || !child.pid) return
+      killRequested = true
+      try {
+        if (process.platform === "win32" && policy === "tree") {
+          // Absolute taskkill: never resolve through the CWD.
+          execFile(systemTool("taskkill.exe"), ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {})
+        } else {
+          child.kill()
+        }
+      } catch { /* best effort */ }
+    }
+    const finish = (result: CommandResult) => {
+      if (settled) return
+      settled = true
+      unsubscribe?.()
+      resolve(result)
+    }
     const child = execFile(command, commandArgs, {
       cwd: options.cwd,
       env: options.env ? { ...process.env, ...options.env } : process.env,
@@ -78,7 +127,7 @@ function capture(file: string, args: string[], options: ExecOptions = {}): Promi
       windowsVerbatimArguments: batch,
       maxBuffer: limit,
       shell: false,
-    }, (error, stdout, stderr) => {
+    }, async (error, stdout, stderr) => {
       const durationMs = Date.now() - started
       const errRecord = (error ?? null) as unknown as {
         code?: unknown
@@ -91,42 +140,93 @@ function capture(file: string, args: string[], options: ExecOptions = {}): Promi
       // means the executable itself is missing. Neither is a normal exit code.
       const killed = errRecord?.killed === true
       const message = typeof errRecord?.message === "string" ? errRecord.message : ""
-      const timedOut = !!errRecord && (killed || /timed out|ETIMEDOUT/i.test(message))
+      const overflow = /maxBuffer|ENOBUFS/i.test(message)
+      const timedOut = !!errRecord && !overflow && (killed || /timed out|ETIMEDOUT/i.test(message))
+      const cancelled = !!cancel?.requested && killRequested
+      // A timed-out or cancelled command may have left grandchildren behind:
+      // kill the tree before resolving so nothing mutates after we report.
+      if ((timedOut || cancelled) && policy === "tree" && registry && child.pid) {
+        try { await registry.killOwnedTree(child.pid) } catch { /* best effort */ }
+      }
       const code = typeof errRecord?.code === "number" ? errRecord.code : errRecord ? 1 : 0
       const result: CommandResult = {
-        code,
+        code: cancelled ? 130 : code,
         stdout: String(stdout ?? ""),
         stderr: String(stderr ?? ""),
         ...(timedOut ? { timedOut: true as const } : {}),
+        ...(cancelled ? { cancelled: true as const } : {}),
         durationMs,
       }
-      if (errRecord && !result.stderr) {
+      if (cancelled) {
+        result.error = "Cancelled by the user."
+      } else if (errRecord && !result.stderr) {
         const raw = typeof errRecord.message === "string" && errRecord.message ? errRecord.message : `command failed with code ${code}`
-        result.error = timedOut
-          ? `timed out after ${timeoutMs}ms: ${sanitizeDetail(raw)}`
-          : sanitizeDetail(raw)
+        result.error = overflow
+          ? `command output exceeded ${limit} bytes: ${sanitizeDetail(raw)}`
+          : timedOut
+            ? `timed out after ${timeoutMs}ms: ${sanitizeDetail(raw)}`
+            : sanitizeDetail(raw)
       }
-      resolve(result)
+      finish(result)
     })
+    if (child.pid && registry) {
+      registry.adopt(child, { label: options.label ?? basename(file), policy })
+    }
+    // Register the cancel listener only after the child exists, so a late
+    // onRequest cannot run before `child` is initialised.
+    unsubscribe = cancel?.onRequest(killOnce)
     if (options.input !== undefined) child.stdin?.end(options.input)
     else child.stdin?.end()
   })
 }
 
+/** Absolute Windows system tool path; never resolved through the CWD. */
+export function systemTool(name: string): string {
+  if (process.platform !== "win32") return name
+  const root = process.env.SystemRoot || process.env.windir || "C:\\Windows"
+  return join(root, "System32", name)
+}
+
+/**
+ * PATH-only executable resolution. `where.exe` searches the current working
+ * directory first, which would let a planted `pwsh.exe`/`spicetify.exe` in a
+ * cloned repo run with the installer's privileges. The resolver itself is
+ * spawned by absolute path, results are filtered to directories that actually
+ * appear in PATH, and the process CWD is always rejected.
+ */
 async function which(name: string): Promise<string | undefined> {
   if (process.platform === "win32") {
-    const result = await capture("where.exe", [name], { timeoutMs: OPERATION_TIMEOUTS.inspection })
+    const result = await capture(systemTool("where.exe"), [name], { timeoutMs: OPERATION_TIMEOUTS.inspection })
+    const pathDirs = new Set(
+      (process.env.PATH ?? "")
+        .split(delimiter)
+        .map((dir) => dir.trim().replace(/^"|"$/g, ""))
+        .filter((dir) => dir.length > 0 && dir !== ".")
+        .map((dir) => stripTrailingSep(dir).toLowerCase()),
+    )
+    const cwd = stripTrailingSep(process.cwd()).toLowerCase()
     const candidates = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+      .filter((candidate) => {
+        if (!/^[A-Za-z]:[\\/]/.test(candidate) && !candidate.startsWith("\\\\")) return false
+        const dir = stripTrailingSep(dirname(candidate)).toLowerCase()
+        return dir !== cwd && pathDirs.has(dir)
+      })
     const rank = (value: string) => /\.exe$/i.test(value) ? 0 : /\.cmd$/i.test(value) ? 1 : /\.bat$/i.test(value) ? 2 : /\.ps1$/i.test(value) ? 3 : 4
     const found = candidates.sort((a, b) => rank(a) - rank(b))[0]
     return result.code === 0 && found ? found : undefined
   }
-  const paths = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
+  const paths = (process.env.PATH ?? "").split(delimiter)
+    .map((dir) => dir.trim())
+    .filter((dir) => dir.length > 0 && dir !== ".")
   for (const dir of paths) {
     const candidate = join(dir, name)
     try { if (existsSync(candidate) && statSync(candidate).isFile()) return candidate } catch { /* continue */ }
   }
   return undefined
+}
+
+function stripTrailingSep(value: string): string {
+  return value.replace(/[\\/]+$/, "")
 }
 
 function portOpen(host: string, port: number, timeoutMs: number): Promise<boolean> {
@@ -146,19 +246,90 @@ function portOpen(host: string, port: number, timeoutMs: number): Promise<boolea
   })
 }
 
-export function createRuntime(): Runtime {
+export function createRuntime(context: RuntimeSignalContext = {}): Runtime {
   const resolve = async (file: string): Promise<string> => {
     if (process.platform !== "win32") return file
     if (/[\\/]/.test(file) || /\.[A-Za-z0-9]+$/.test(file)) return file
     return (await which(file)) ?? file
   }
+  const runInteractive: Runtime["runInteractive"] = async (file, args, options = {}) => {
+    const started = Date.now()
+    const target = await resolve(file)
+    const policy = options.killPolicy ?? "tree"
+    const cancel = options.cancel ?? context.cancel
+    if (cancel?.requested) {
+      return { code: 130, stdout: "", stderr: "", cancelled: true, error: "Cancelled by the user.", durationMs: Date.now() - started }
+    }
+    return new Promise((res) => {
+      let settled = false
+      let killRequested = false
+      const finish = (result: CommandResult) => {
+        if (settled) return
+        settled = true
+        unsubscribe?.()
+        res(result)
+      }
+      const child = spawn(target, args, {
+        cwd: options.cwd,
+        env: options.env ? { ...process.env, ...options.env } : process.env,
+        stdio: "inherit",
+        windowsHide: false,
+        shell: false,
+      })
+      let unsubscribe: (() => void) | undefined
+      const killTree = () => {
+        if (killRequested || policy === "none" || cancel?.killHeld || !child.pid) return
+        killRequested = true
+        try {
+          if (process.platform === "win32" && policy === "tree") {
+            execFile(systemTool("taskkill.exe"), ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {})
+          } else {
+            child.kill()
+          }
+        } catch { /* best effort */ }
+      }
+      unsubscribe = cancel?.onRequest(killTree)
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        killTree()
+      }, OPERATION_TIMEOUTS.packageInstall)
+      child.on("error", (error) => {
+        clearTimeout(timer)
+        finish({
+          code: 1,
+          stdout: "",
+          stderr: "",
+          error: sanitizeDetail(error instanceof Error ? error.message : "interactive spawn failed"),
+          timedOut,
+          durationMs: Date.now() - started,
+        })
+      })
+      child.on("close", (code) => {
+        clearTimeout(timer)
+        const cancelled = !!cancel?.requested && killRequested
+        finish({
+          code: cancelled ? 130 : (code ?? 1),
+          stdout: "",
+          stderr: "",
+          ...(timedOut ? { timedOut: true as const } : {}),
+          ...(cancelled ? { cancelled: true as const } : {}),
+          ...(cancelled ? { error: "Cancelled by the user." } : {}),
+          durationMs: Date.now() - started,
+        })
+      })
+      if (child.pid && context.children) {
+        context.children.adopt(child, { label: options.label ?? basename(file), policy })
+      }
+    })
+  };
   return {
     platform: process.platform,
     arch: process.arch,
     env: process.env,
     cwd: process.cwd(),
     homedir: homedir(),
-    run: async (file, args, options) => capture(await resolve(file), args, options),
+    run: async (file, args, options) => capture(await resolve(file), args, options, context),
     which,
     exists: (path) => existsSync(path),
     isFile: (path) => { try { return statSync(path).isFile() } catch { return false } },
@@ -169,6 +340,7 @@ export function createRuntime(): Runtime {
     remove: (path) => { rmSync(path, { recursive: true, force: true }) },
     now: () => Date.now(),
     portOpen,
+    runInteractive,
   }
 }
 

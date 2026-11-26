@@ -30,7 +30,7 @@ export type WidthMethod = "unicode" | "wcwidth" | "unicode-wide"
  * method and wcwidth keeps every wrapped/truncated row inside its box under
  * both models; residual font-shaping overhang is absorbed by cellSafety.
  * Proven by ConPTY cursor-position (DSR 6n) probes on Windows (see
- * docs/VERIFICATION.md V0.5.6 table): the terminal advances Indic combining
+ * docs/ARCHITECTURE.md renderer section): the terminal advances Indic combining
  * sequences, viramas, ZWJ and variation selectors cell-by-cell (effectively
  * per UTF-16 code unit) while both tables count them as zero-width, so the
  * UTF-16 unit count is also folded into the max below.
