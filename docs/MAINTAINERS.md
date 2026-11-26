@@ -336,8 +336,8 @@ Failure codes are `E_PIN_MISMATCH` (original bytes), `E_PATCH_FAILED`
   directory, executes it, and deletes the directory after a confirmed exit.
 - The offline test fixture embeds the pinned upstream bytes (base64) only to
   verify the patch and wrapper; it is not part of the published package. If the
-  project is redistributed as source, that fixture is covered by the upstream
-  LGPL-2.1 notice.
+  project is redistributed as source, that fixture is governed by the upstream
+  LGPL-2.1 terms in `THIRD_PARTY_NOTICES.md` at the repository root.
 - The original block is quoted in this document for review only, with its upstream
   licence attribution. It is not part of the shipped MIT source or the package.
 - The replacement comments carry the upstream revision and licence attribution. No

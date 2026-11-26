@@ -29,7 +29,12 @@ coverage/
 *.backup-*
 *.tmp
 # An accidental PowerShell/Windows output redirection artifact.
+NUL
 /plugin/NUL
+# Diagnostic captures and screenshots can include live account or session
+# content. Never commit these; keep them outside the repository.
+screenshots/
+captures/
 # Historical terminal captures can include live account or session content.
 /docs/V0.5.3_BEFORE_AFTER.png
 /docs/V0.5.3_LIVE_SIDEBAR.*
