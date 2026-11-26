@@ -1559,7 +1559,13 @@ function pathInfo(path: string): { symlink: boolean; realPath: string | null } {
 
 test("boundary checks reject sibling prefixes and junction escapes on real temp fixtures", (t) => {
   const root = mkdtempSync(join(tmpdir(), "opencode-uninstall-boundary-"))
-  const localRoot = join(root, "local", "spicetify")
+  // Resolve the fixture root through the same real-path lens the product code
+  // uses: hosted runners may place TEMP behind a junction or 8.3 short-name
+  // path, and the gate correctly fail-closes on such aliasing. Anchoring the
+  // fixture to the resolved path keeps the test about the gate's decisions,
+  // not about the runner's TEMP layout. Refusal cases below are unaffected.
+  const rootReal = pathInfo(root).realPath ?? root
+  const localRoot = join(rootReal, "local", "spicetify")
   const sibling = join(root, "local", "spicetify-other")
   const outside = join(root, "outside")
   const junction = join(root, "escape-junction")
