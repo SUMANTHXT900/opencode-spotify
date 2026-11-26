@@ -1,4 +1,5 @@
 import { compareVersions, isFloatingSpec } from "./compat.ts"
+import type { AvailableUpdate } from "./versions.ts"
 
 export interface UpdateAvailability {
   plugin: "current" | "outdated" | "unknown" | "downgrade"
@@ -99,11 +100,9 @@ export function describePluginUpdate(
   }
   let sawCurrent = false
   let sawOlder = false
-  let sawUnknown = false
   for (const tag of tags) {
     const compared = compareVersions(tag, installed)
     if (compared === null) {
-      sawUnknown = true
       continue
     }
     if (compared === 0) sawCurrent = true
@@ -120,7 +119,6 @@ export function describePluginUpdate(
     return { ...channels, status: "unknown", target: null }
   }
   if (sawCurrent) return { ...channels, status: "current", target: null }
-  if (sawOlder && !sawUnknown) return { ...channels, status: "registry-older", target: null }
   if (sawOlder) return { ...channels, status: "registry-older", target: null }
   return { ...channels, status: "unknown", target: null }
 }
@@ -147,6 +145,30 @@ export function describePluginVersionLine(installed: string | null, info: Plugin
   if (info.status === "registry-older") return `${current} (registry tag is older; kept)`
   if (info.status === "unknown") return `${current} (target unknown)`
   return current
+}
+
+/**
+ * Channel-aware plugin update expressed as an AvailableUpdate (B23 single
+ * source of truth for status/doctor output). A beta install that matches the
+ * beta tag is "current", never a "downgrade": comparing against the stable
+ * tag alone would falsely warn "installed version is newer".
+ */
+export function pluginAvailableUpdate(
+  installed: string | null,
+  latest: string | null,
+  beta: string | null,
+): AvailableUpdate {
+  const info = describePluginUpdate(installed, latest, beta)
+  switch (info.status) {
+    case "update-available":
+      return { installed, latest: info.target, status: "outdated", available: true }
+    case "current":
+      return { installed, latest: latest ?? beta ?? installed, status: "current", available: false }
+    case "registry-older":
+      return { installed, latest: latest ?? beta ?? null, status: "downgrade", available: false }
+    default:
+      return { installed, latest: latest ?? null, status: "unknown", available: false }
+  }
 }
 
 export function selectPluginTarget(

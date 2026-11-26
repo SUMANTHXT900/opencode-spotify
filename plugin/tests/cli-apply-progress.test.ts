@@ -51,12 +51,26 @@ function makeRuntime(options: {
     async which(name: string) {
       return name === "spicetify" ? SPICETIFY : undefined
     },
-    // hasMissingBackup probes only the shared Spicetify backup candidates.
+    // hasMissingBackup probes the backup candidates with the shared detailed
+    // inspector: a present directory only counts when it holds both restore
+    // archives at plausible sizes.
     exists: (path: string) =>
       options.backupDirs
         ? options.backupDirs.some((dir) => dir.toLowerCase() === path.toLowerCase())
         : options.backupExists && /[\\/]Backup$/.test(path),
     isFile: () => false,
+    fileSize: (path: string) => {
+      const lower = path.toLowerCase()
+      if (lower.endsWith("xpui.spa")) return 1_000_000
+      if (lower.endsWith("login.spa")) return 100_000
+      return null
+    },
+    listDir: (dir: string) => {
+      const present = options.backupDirs
+        ? options.backupDirs.some((candidate) => candidate.toLowerCase() === dir.toLowerCase())
+        : options.backupExists && /[\\/]Backup$/.test(dir)
+      return present ? ["xpui.spa", "login.spa"] : null
+    },
     readText: () => "",
     writeText: () => {},
     copyFile: () => {},

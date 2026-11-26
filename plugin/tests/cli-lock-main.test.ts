@@ -283,9 +283,12 @@ test("a held lock keeps status and doctor read-only and leaves the owner untouch
 })
 
 test("dry-run never acquires the lock for any mutating command", async () => {
+  // The running installer binary is itself a selectable update target when
+  // strictly newer than the registered plugin, so an offline update dry-run
+  // plans (0) instead of erroring on the unknown registry.
   const cases: Array<{ argv: string[]; expected: number }> = [
     { argv: ["setup", "--dry-run", "--offline", "--spicetify=skip"], expected: 0 },
-    { argv: ["update", "--dry-run", "--offline"], expected: 1 },
+    { argv: ["update", "--dry-run", "--offline"], expected: 0 },
     { argv: ["repair", "--dry-run", "--offline"], expected: 0 },
     { argv: ["uninstall", "--dry-run", "--offline", "--yes", "--non-interactive"], expected: 0 },
   ]

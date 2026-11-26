@@ -41,6 +41,10 @@ const CONFIG_DIR = "C:\\Users\\Test\\AppData\\Roaming\\spicetify"
 const CONFIG_BACKUP_DIR = `${CONFIG_DIR}\\Backup`
 const CREDENTIAL_DIR = "C:\\Users\\Test\\AppData\\Roaming\\opencode-spotify"
 const INSTALLED_XPUI = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\xpui.spa"
+const INSTALLED_LOGIN = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\login.spa"
+const MOD_XPUI_DIR = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\xpui"
+const MOD_LOGIN_DIR = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\login"
+const SPOTIFY_APPS_DIR = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps"
 
 type FakeRuntime = ReturnType<typeof fakeRuntime>
 type SizeSpec = number | "missing" | "unreadable"
@@ -69,15 +73,45 @@ function installBackup(runtime: FakeRuntime, options: {
   login?: SizeSpec
   /** Installed Spotify xpui.spa size; "missing" simulates an unverifiable restore. */
   installedXpui?: number | "missing"
+  /** Installed Spotify login.spa size; "missing" simulates an unverifiable restore. */
+  installedLogin?: number | "missing"
 } = {}) {
   const directory = options.directory ?? CONFIG_BACKUP_DIR
   const xpui = options.xpui ?? 5_000_000
+  const login = options.login ?? 200_000
   const files = new Set<string>()
   const sizes = new Map<string, number>()
   const realExists = runtime.exists.bind(runtime)
   const realIsFile = runtime.isFile.bind(runtime)
-  runtime.exists = (path: string) => files.has(path) || path === directory || realExists(path)
-  runtime.isFile = (path: string) => files.has(path) || realIsFile(path)
+  const realListDir = (runtime as FakeRuntime & { listDir?: (path: string) => string[] | null }).listDir?.bind(runtime)
+  const norm = (value: string) => value.toLowerCase().replace(/[\\/]+$/, "")
+  runtime.exists = (path: string) => {
+    if (norm(path) === norm(MOD_XPUI_DIR) || norm(path) === norm(MOD_LOGIN_DIR)) return false
+    if (files.has(path)) return true
+    if (path === directory) return true
+    return realExists(path)
+  }
+  runtime.isFile = (path: string) => {
+    if (norm(path) === norm(MOD_XPUI_DIR) || norm(path) === norm(MOD_LOGIN_DIR)) return false
+    if (files.has(path)) return true
+    return realIsFile(path)
+  };
+  (runtime as FakeRuntime & { listDir?: (path: string) => string[] | null }).listDir = (path: string) => {
+    if (norm(path) === norm(SPOTIFY_APPS_DIR)) {
+      const entries: string[] = []
+      if (files.has(INSTALLED_XPUI)) entries.push("xpui.spa")
+      if (files.has(INSTALLED_LOGIN)) entries.push("login.spa")
+      return entries
+    }
+    if (realListDir) {
+      try {
+        return realListDir(path)
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
 
   const add = (path: string, spec: SizeSpec): void => {
     if (spec === "missing") return
@@ -85,13 +119,17 @@ function installBackup(runtime: FakeRuntime, options: {
     if (spec !== "unreadable") sizes.set(path, spec)
   }
   add(`${directory}\\xpui.spa`, xpui)
-  add(`${directory}\\login.spa`, options.login ?? 200_000)
+  add(`${directory}\\login.spa`, login)
 
   if (options.installedXpui !== "missing") {
     add(
       INSTALLED_XPUI,
       options.installedXpui ?? (typeof xpui === "number" ? xpui : 5_000_000),
     )
+  }
+  if (options.installedLogin !== "missing") {
+    const loginSize = options.installedLogin ?? (typeof login === "number" ? login : 200_000)
+    add(INSTALLED_LOGIN, loginSize)
   }
 
   return { directory, fileSize: (path: string) => sizes.get(path) ?? null }
@@ -291,7 +329,9 @@ test("an unverifiable restore (missing installed xpui.spa) aborts before deletio
   assert.deepEqual(removed, [])
   assert.deepEqual(credentialRemovals, [])
   assert.match(text(ui), /Restore verification failed/i)
-  assert.match(text(ui), /could not locate Spotify's installed xpui\.spa/i)
+  // Stock-state verification reports the missing spa bundle (new) or the
+  // legacy installed-xpui lookup (old); either proves the restore was blocked.
+  assert.match(text(ui), /could not locate Spotify's installed xpui\.spa|Missing Spotify app files|Spotify app file is missing/i)
   assert.match(text(ui), /config and backups were kept/i)
 })
 
@@ -318,7 +358,10 @@ test("a credential-removal failure reports removed, failed and skipped component
   assert.deepEqual(removed, [], "directory steps after the failure are not attempted")
   const calls = commands(runtime)
   assert.ok(calls.some((call) => call.includes("plugin remove")), "earlier owned steps still ran")
-  assert.ok(calls.some((call) => call.includes("-Uninstall")))
+  // The redundant install-extension.ps1 -Uninstall step is skipped when
+  // restore succeeded and the full Spicetify config + credentials wipe is
+  // planned; the bridge is removed via the config deletion instead.
+  assert.ok(!calls.some((call) => call.includes("-Uninstall")), "redundant bridge uninstall is skipped when full wipe is planned")
   assert.match(text(ui), /Removal is incomplete/i)
   assert.match(text(ui), /Could not remove Bridge credentials and pinned Origin/i)
   assert.match(text(ui), /Not attempted: Spicetify installation/i)
@@ -356,6 +399,7 @@ test("a second complete uninstall is a clean no-op and never re-deletes anything
     [`${CONFIG_BACKUP_DIR}\\xpui.spa`, 5_000_000],
     [`${CONFIG_BACKUP_DIR}\\login.spa`, 200_000],
     [INSTALLED_XPUI, 5_000_000],
+    [INSTALLED_LOGIN, 200_000],
   ])
   const memory = memoryPaths([
     LOCAL_DIR,
@@ -1262,7 +1306,10 @@ test("cancellation during a boundary deletion stops the next step", async () => 
   const realRun = runtime.run.bind(runtime)
   runtime.run = (async (file: string, args: string[], options?: ExecOptions): Promise<CommandResult> => {
     const result = await realRun(file, args, options)
-    if (file.includes("pwsh") && args.join(" ").includes("-Uninstall")) {
+    // The redundant bridge ps1 is skipped when the full wipe is planned, so
+    // cancel during the registration boundary instead (the first mutating
+    // step after the protected restore).
+    if (file.includes("opencode") && args[1] === "remove") {
       ctxForCancel.cancel.request("user")
     }
     return result

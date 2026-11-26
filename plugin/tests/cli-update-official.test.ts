@@ -11,7 +11,7 @@ import {
   runUninstall,
 } from "../src/cli/uninstall.ts"
 import { runRepair } from "../src/cli/repair.ts"
-import { runUpdate, spicetifyUpdateDescription, spicetifyUpdateGate, spicetifyUpdateMethod, spicetifyUpdateTarget, stableSpicetifyVersion } from "../src/cli/update.ts"
+import { installerUpdateTarget, runUpdate, spicetifyUpdateDescription, spicetifyUpdateGate, spicetifyUpdateMethod, spicetifyUpdateTarget, stableSpicetifyVersion } from "../src/cli/update.ts"
 import type { Prompter } from "../src/cli/types.ts"
 import { context, fakeDetection, fakePrompt, fakeReport, fakeRuntime, fakeUi } from "./cli-fixture.ts"
 
@@ -219,6 +219,36 @@ test("invalid credentials are regenerated (install) instead of reused", async ()
   assert.match(ui.lines.join("\n"), /credentials regenerated/i)
 })
 
+test("installerUpdateTarget selects max(registry, installer) without downgrading channels", () => {
+  // Channel-compatible: beta installs accept a newer beta installer.
+  assert.equal(installerUpdateTarget("0.6.0-beta.1", "0.6.0-beta.2", null), "0.6.0-beta.2")
+  // Channel-compatible: a stable installer for a stable install.
+  assert.equal(installerUpdateTarget("0.5.7", "0.6.0", "0.5.7"), "0.6.0")
+  // Never a downgrade or reinstall.
+  assert.equal(installerUpdateTarget("0.6.0", "0.6.0", "0.7.0"), null)
+  assert.equal(installerUpdateTarget("0.7.0", "0.6.0", null), null)
+  assert.equal(installerUpdateTarget(null, "0.6.0", "0.6.0"), null)
+  // A stable install never auto-migrates to a prerelease channel, unless the
+  // explicitly-run binary itself outranks the registry target (npx consent).
+  assert.equal(installerUpdateTarget("0.5.7", "0.6.0-beta.1", "0.5.7"), "0.6.0-beta.1")
+  assert.equal(installerUpdateTarget("0.5.7", "0.6.0-beta.1", "0.6.0"), null)
+})
+
+test("a newer installer binary is an update target even when the registry is stale", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.5.7"
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "update", yes: true, nonInteractive: true })
+  ctx.detection = fakeDetection(runtime)
+  ctx.installerVersion = "0.6.0"
+  ctx.versions.plugin.latest = "0.5.7"
+  ctx.versions.plugin.latestBeta = null
+
+  assert.equal(await runUpdate(ctx), 0, ui.lines.join("\n"))
+  const calls = commands(runtime)
+  assert.ok(calls.some((command) => command.includes("plugin add opencode-spotify@0.6.0")))
+})
+
 test("interactive update-everything selection authorizes both and keeps plan consent", async () => {
   const runtime = fakeRuntime()
   runtime.state.opencode.listVersion = "0.5.7"
@@ -284,9 +314,9 @@ function wingetRuntime(installed = "2.46.0") {
   return runtime
 }
 
-test("Spicetify-only update asks for plan consent exactly once", async () => {
+test("Spicetify-only update asks for plan consent, then always offers apply", async () => {
   const runtime = wingetRuntime()
-  const prompt = scriptedPrompt({ confirms: [true] })
+  const prompt = scriptedPrompt({ confirms: [true, true] })
   const ui = fakeUi()
   const ctx = context(runtime, ui, prompt, { command: "update", allowSpicetifyUpgrade: true })
   ctx.detection = fakeDetection(runtime)
@@ -299,14 +329,16 @@ test("Spicetify-only update asks for plan consent exactly once", async () => {
   ctx.versions.spicetify.latest = "2.47.0"
 
   assert.equal(await runUpdate(ctx, "spicetify"), 0, ui.lines.join("\n"))
-  // One consent: the plan screen. The approval callback only displays details.
-  assert.equal(prompt.asked.length, 1, prompt.asked.join("\n"))
+  // One consent for the upgrade plan, plus the separate apply offer: the
+  // upgrade always ends with an apply prompt even when the bridge is healthy.
+  assert.equal(prompt.asked.length, 2, prompt.asked.join("\n"))
   assert.match(prompt.asked[0] ?? "", /Apply this plan\?/)
-  assert.ok(!prompt.asked.some((question) => /Upgrade Spicetify using this owner-safe method/i.test(question)))
+  assert.match(prompt.asked[1] ?? "", /Apply Spicetify changes now\?/)
   const text = ui.lines.join("\n")
   assert.match(text, /Spicetify upgrade plan/)
   assert.match(text, /Method: winget/)
   assert.ok(commands(runtime).some((command) => command.startsWith("C:\\winget.exe upgrade")))
+  assert.ok(commands(runtime).some((command) => command.endsWith("spicetify.exe apply")))
 })
 
 test("unknown Spicetify latest never prints current and refuses an explicit-only run", async () => {

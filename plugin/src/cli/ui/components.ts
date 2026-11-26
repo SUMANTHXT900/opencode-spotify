@@ -57,8 +57,6 @@ export interface DesignSystem {
   hint(text: string): unknown
   menu(items: MenuItem[], selected: number): unknown[]
   plan(rows: PlanRow[], options?: PlanOptions): unknown[]
-  tokenRow(label: string, hex: string, ratio: string, note?: string): unknown
-  noteRow(label: string, text: string): unknown
 }
 
 export function createDesignSystem(ink: InkRuntime, options: DesignSystemOptions): DesignSystem {
@@ -192,22 +190,6 @@ export function createDesignSystem(ink: InkRuntime, options: DesignSystemOptions
             h(Text, colorProp(theme.muted), padEndDisplay(row.status, 7))))
         return h(Text, { key: row.index, wrap: "truncate" }, ...parts)
       })
-    },
-
-    tokenRow(label: string, hex: string, ratio: string, note?: string): unknown {
-      return h(Text, { key: label, wrap: "truncate" },
-        "  ",
-        h(Text, colorProp(theme.muted), padEndDisplay(label, 11)),
-        h(Text, colorProp(hex), padEndDisplay(hex, 9)),
-        h(Text, colorProp(theme.text), ratio.padStart(6)),
-        note ? h(Text, colorProp(theme.muted), `  ${note}`) : null)
-    },
-
-    noteRow(label: string, text: string): unknown {
-      return h(Text, { key: label, wrap: "truncate" },
-        "  ",
-        h(Text, colorProp(theme.muted), padEndDisplay(label, 11)),
-        h(Text, colorProp(theme.muted), text))
     },
   }
 }

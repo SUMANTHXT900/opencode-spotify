@@ -99,7 +99,7 @@ export const UNINSTALL_MENU_CHOICES: readonly UninstallMenuChoice[] = [
   {
     label: "Complete permanent removal",
     value: "complete",
-    hint: "Also delete the signing secret and pinned Origin. Requires typing UNINSTALL.",
+    hint: "Restore Spotify and permanently remove plugin, credentials, Spicetify, Marketplace, themes, extensions and exact PATH entries. Requires typing UNINSTALL.",
   },
   {
     label: "Back",

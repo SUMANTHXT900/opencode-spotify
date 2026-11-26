@@ -57,12 +57,19 @@ export function createUi(log: Logger, options: { color: boolean; json: boolean }
 }
 
 export function createPrompter(log: Logger): Prompter {
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY })
+  // Lazy readline creation: importing the prompter or constructing it must not
+  // open stdin/stdout handles. The interface is created on first prompt so
+  // --help/--version, JSON mode and tests never hold the terminal.
+  let rl: ReturnType<typeof createInterface> | undefined
   let closed = false
+  const ensureRl = () => {
+    if (!rl) rl = createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY })
+    return rl
+  }
   const ask = async (question: string) => {
     if (closed) return undefined
     try {
-      const answer = await rl.question(question)
+      const answer = await ensureRl().question(question)
       return answer.trim()
     } catch {
       return undefined
@@ -102,7 +109,7 @@ export function createPrompter(log: Logger): Prompter {
     close() {
       if (closed) return
       closed = true
-      try { rl.close() } catch { /* already closed */ }
+      try { rl?.close() } catch { /* already closed */ }
     },
   }
 }

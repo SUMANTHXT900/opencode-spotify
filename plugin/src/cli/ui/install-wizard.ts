@@ -112,6 +112,8 @@ export interface InstallWizardInput {
   pin?: OfficialInstallerPin
   dryRun?: boolean
   nonInteractive?: boolean
+  /** Crisp default output; --verbose restores the full non-effects wall. */
+  verbose?: boolean
 }
 
 /** Normalize a caller target, falling back to the resolved latest version. */
@@ -249,6 +251,7 @@ export function renderOfficialInstallerExplanation(
     installedVersion: null,
     latestVersion: null,
   },
+  options: { verbose?: boolean } = {},
 ): void {
   const target = resolveInstallTarget({ ...input, pin })
   // Only the built-in pin gets the ledger-conditional claim recomputed here. A
@@ -267,8 +270,15 @@ export function renderOfficialInstallerExplanation(
   ui.kv("Latest detected", displayValue(input.latestVersion, "unknown (offline or lookup failed)"))
   ui.line("  What it does:")
   for (const effect of effects) ui.bullet(effect)
+  // Crisp default: the full non-effects wall is --verbose only. Runtime
+  // enforcement (verification, preflight, patch removal) is unchanged.
+  const verbose = options.verbose === true || (input as { verbose?: boolean }).verbose === true
   ui.line("  What it does NOT do:")
-  for (const not of pin.nots) ui.bullet(not)
+  const nots = verbose ? pin.nots : pin.nots.slice(0, 3)
+  for (const not of nots) ui.bullet(not)
+  if (!verbose && pin.nots.length > nots.length) {
+    ui.line(`  Run with --verbose to see all ${pin.nots.length} non-effects.`)
+  }
   if (target && input.latestVersion && compareVersions(input.latestVersion, target) === 1) {
     ui.warn(
       `Latest detected ${input.latestVersion} is newer than the install target ${target}. ` +
@@ -409,7 +419,7 @@ export function renderResultScreen(ui: Ui, result: InstallWizardResult): void {
   switch (result.status) {
     case "installed":
       ui.success(`Spicetify ${result.version ?? "installation"} completed with the pinned official installer.`)
-      ui.bullet("Plugin registration and bridge setup are still separate; rerun setup and approve them there.")
+      ui.bullet("Plugin registration and bridge setup continue automatically as the next setup steps.")
       ui.bullet("`spicetify apply` remains pending and is never run by the install wizard.")
       break
     case "manual":
@@ -460,6 +470,7 @@ export interface InstallWizardDeps {
   method?: InstallMethod
   dryRun?: boolean
   nonInteractive?: boolean
+  verbose?: boolean
   pin?: OfficialInstallerPin
   /** The caller already rendered the selection context; skip the duplicate. */
   selectionRendered?: boolean
@@ -484,6 +495,7 @@ export async function runInstallWizard(deps: InstallWizardDeps): Promise<Install
     pin,
     dryRun: deps.dryRun === true,
     nonInteractive: deps.nonInteractive === true,
+    verbose: deps.verbose === true,
   }
   try {
     input.latestVersion = await deps.latestVersion()
@@ -531,7 +543,7 @@ export async function runInstallWizard(deps: InstallWizardDeps): Promise<Install
     })
   }
 
-  renderOfficialInstallerExplanation(deps.ui, pin, { ...input, target })
+  renderOfficialInstallerExplanation(deps.ui, pin, { ...input, target }, { verbose: input.verbose === true })
   renderPlanPreview(deps.ui, officialInstallPlan(pin, target))
 
   const approval = await approveOfficialInstall(deps.prompt, pin, {

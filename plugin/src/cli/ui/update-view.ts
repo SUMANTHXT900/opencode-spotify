@@ -178,7 +178,7 @@ export function spicetifyUpdateGuidance(
         command: null,
         lines: [
           "This Spicetify came from a verified GitHub release zip.",
-          "The unverified `spicetify upgrade` self-updater is refused for this installation.",
+          "The unverified `spicetify-cli upgrade` self-updater is refused for this installation.",
           "Re-run setup and choose the verified release option, or update manually with SHA-256 verification.",
           `Docs: ${SPICETIFY_DOCS_URL}`,
         ],
@@ -188,8 +188,8 @@ export function spicetifyUpdateGuidance(
     return {
       owner,
       category,
-      method: "official installer (spicetify upgrade)",
-      command: "spicetify upgrade",
+      method: "official installer (spicetify-cli upgrade)",
+      command: "spicetify-cli upgrade",
       lines: [
         "This installation is owned by the official Spicetify installer.",
         "Keep using the official installer; do not also run winget, Scoop, or Chocolatey against it.",
@@ -213,8 +213,8 @@ export function spicetifyUpdateGuidance(
     return {
       owner,
       category,
-      method: "Scoop (spicetify)",
-      command: "scoop update spicetify",
+      method: "Scoop (spicetify-cli)",
+      command: "scoop update spicetify-cli",
       lines: [
         "This installation is owned by Scoop.",
         "Only Scoop should update it; do not mix package managers.",
@@ -225,8 +225,8 @@ export function spicetifyUpdateGuidance(
     return {
       owner,
       category,
-      method: "Chocolatey (spicetify)",
-      command: "choco upgrade spicetify -y",
+      method: "Chocolatey (spicetify-cli)",
+      command: "choco upgrade spicetify-cli -y",
       lines: [
         "This installation is owned by Chocolatey.",
         "Only Chocolatey should update it; do not mix package managers.",

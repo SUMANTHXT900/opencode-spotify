@@ -316,6 +316,24 @@ test("status surfaces available updates and local/global source conflicts", asyn
   assert.ok(local.report.conflicts.details.length > 0)
 })
 
+test("beta installs never warn installed-newer when the beta tag matches", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.6.0-beta.2"
+  const ui = fakeUi()
+  const ctx = context(
+    runtime,
+    ui,
+    fakePrompt(),
+    { command: "status", json: true },
+    { plugin: { latest: "0.5.7", latestBeta: "0.6.0-beta.2" }, spicetify: { latest: null } },
+  )
+  ctx.detection = fakeDetection(runtime)
+  assert.equal(await runStatus(ctx), 0)
+  const report = ui.jsonValue as StatusReport
+  assert.equal(report.updates.plugin.status, "current")
+  assert.equal(report.updates.plugin.available, false)
+})
+
 test("status text separates registration from runtime and points at the official installer", async () => {
   const runtime = fakeRuntime()
   const ui = fakeUi()

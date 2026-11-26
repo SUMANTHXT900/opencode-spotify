@@ -5,7 +5,7 @@ import { lstatSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { BRIDGE_PROTOCOL } from "./compat.ts";
 import { packageRoot, OPERATION_TIMEOUTS } from "./runtime.ts";
-import { spicetifyBackupCandidates } from "./spicetify.ts";
+import { spicetifyBackupCandidates, inspectBackupStateDetailed } from "./spicetify.ts";
 import type { BridgeInfo, CommandResult, Runtime, SpicetifyInfo } from "./types.ts";
 
 export const BRIDGE_FILE = "opencode-spotify-bridge.js";
@@ -246,7 +246,7 @@ export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): P
       `${result.stdout ?? ""}\n${result.stderr ?? ""}\n${result.error ?? ""}`,
     );
   let didBackup = false;
-  const needsBackup = hasMissingBackup(runtime);
+  const needsBackup = await hasMissingBackup(runtime);
   if (needsBackup) {
     progress("Spicetify backup not found; creating a backup before apply.");
     const backup = await runtime.run(exe, ["backup"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyBackup });
@@ -297,22 +297,40 @@ export async function applyBridge(runtime: Runtime, opts: ApplyBridgeOptions): P
   return retried;
 }
 
-/** True when every known Spicetify backup directory is absent (B09/B05). Never throws. */
-function hasMissingBackup(runtime: Runtime): boolean {
+/** True when no trustworthy Spicetify backup payload exists (B09/B05). Never throws. */
+async function hasMissingBackup(runtime: Runtime): Promise<boolean> {
   try {
-    // B05: a valid backup may live in the roaming state root, not only under
-    // %LOCALAPPDATA%. Probe the shared candidate list so an existing backup is
-    // never overwritten by an unnecessary `spicetify backup`.
-    let sawCandidate = false;
-    for (const dir of spicetifyBackupCandidates(runtime)) {
-      try {
-        if (runtime.exists(dir)) return false;
-        sawCandidate = true;
-      } catch {
-        continue;
+    // Fail closed when the candidate probes themselves are unreadable.
+    let probed = false;
+    try {
+      for (const dir of spicetifyBackupCandidates(runtime)) {
+        try {
+          runtime.exists(dir);
+          probed = true;
+          break;
+        } catch {
+          continue;
+        }
       }
+    } catch {
+      return false;
     }
-    return sawCandidate;
+    if (!probed) return false;
+    // Reuse the detailed inspector semantics: an existing but empty or
+    // truncated Backup/ (missing xpui.spa/login.spa or implausible sizes) is
+    // "unknown", not "ready", and must still trigger `spicetify backup`
+    // before `spicetify apply`.
+    const synthetic: SpicetifyInfo = {
+      available: true,
+      path: "spicetify",
+      version: null,
+      owner: "unknown",
+      configPath: null,
+      extensionsDir: null,
+      bridgeRegistered: false,
+    };
+    const inspection = await inspectBackupStateDetailed(runtime, synthetic, {});
+    return inspection.state !== "ready";
   } catch {
     // Fail closed: if candidates cannot even be computed, do not force a backup.
     return false;

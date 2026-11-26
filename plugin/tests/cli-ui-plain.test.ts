@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { createUi } from "../src/cli/ui.ts"
+import { createUi, createPrompter } from "../src/cli/ui.ts"
 import {
   createPlainPresentation, createUiIo, envTruthy, plainColorEnabled, selectUiMode, shouldUseInk,
 } from "../src/cli/ui-mode.ts"
@@ -314,4 +314,12 @@ test("plain presentation files never import Ink or React", () => {
     assert.ok(!/from\s+["'](?:ink|react|react-dom|@opentui)/i.test(source), `${file} must not import Ink/React`)
     assert.ok(!/require\(\s*["'](?:ink|react|react-dom|@opentui)/i.test(source), `${file} must not require Ink/React`)
   }
+})
+
+test("createPrompter is lazy: construct and close without holding the terminal", () => {
+  const logger = log()
+  const prompter = createPrompter(logger)
+  // Closing before any prompt must be safe and idempotent.
+  prompter.close()
+  prompter.close()
 })

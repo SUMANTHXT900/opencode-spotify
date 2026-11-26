@@ -1,6 +1,6 @@
 import { BRIDGE_PORT, BRIDGE_PROTOCOL, MIN_OPENCODE, MIN_SPICETIFY } from "./compat.ts"
 import { compatibilityLabel } from "./plan.ts"
-import { resolvePluginChannels } from "./update-plan.ts"
+import { resolvePluginChannels, pluginAvailableUpdate } from "./update-plan.ts"
 import {
   availableUpdate,
   inspectDependencies,
@@ -241,7 +241,7 @@ export function statusReport(ctx: OperationContext): StatusReport {
       bridge: bridgeOwnership(d),
     },
     updates: {
-      plugin: availableUpdate(pluginInstalled, ctx.versions.plugin.latest),
+      plugin: pluginAvailableUpdate(pluginInstalled, ctx.versions.plugin.latest, ctx.versions.plugin.latestBeta ?? null),
       spicetify: availableUpdate(d.spicetify.version, ctx.versions.spicetify.latest),
     },
     dependencies: inspectDependencies(ctx.runtime, import.meta.url),

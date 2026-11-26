@@ -379,7 +379,31 @@ function bridgeSyncStep(ctx: OperationContext, reason: string): PlanStep {
 }
 
 /**
- * Update the plugin (optionally with an owner-safe Spicetify CLI upgrade first)
+ * The running installer binary as an update target. The binary itself is a
+ * newer release the user explicitly invoked (e.g. via npx): when it is
+ * strictly newer than the registered plugin it is selectable as an update
+ * target alongside the registry target (max wins). Channel-compatible pairs
+ * (beta installs, or a stable installer for a stable install) always qualify;
+ * a stable install never auto-migrates to a prerelease channel unless the
+ * user explicitly ran that newer prerelease binary, in which case the
+ * invocation itself is the channel choice. Never a downgrade or reinstall.
+ */
+export function installerUpdateTarget(
+  installed: string | null,
+  installerVersion: string | null | undefined,
+  registryTarget: string | null,
+): string | null {
+  const installer = (installerVersion ?? "").trim()
+  if (!installed || !installer) return null
+  if (compareVersions(installer, installed) !== 1) return null
+  const channelCompatible = /-/.test(installed) || !/-/.test(installer)
+  if (channelCompatible) return installer
+  if (!registryTarget || compareVersions(installer, registryTarget) === 1) return installer
+  return null
+}
+
+/**
+ * The update (optionally with an owner-safe Spicetify CLI upgrade first)
  * and its owned bridge. Never downgrades, never replaces a local development
  * plugin, and never lets an update switch channels.
  */
@@ -413,8 +437,15 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
   // Channel-aware comparison via the single source of truth. Never advertises
   // an older registry tag as an update; never downgrades; never labels a
   // prerelease stable. Stable stays on stable; beta sees newer beta or stable.
-  const pluginInfo = describePluginUpdate(installed, latestStable, latestBeta)
-  const latest = pluginInfo.target
+  // The running installer binary is itself a newer release the user invoked:
+  // max(registryTarget, installerVersion) is selectable when strictly newer.
+  let pluginInfo = describePluginUpdate(installed, latestStable, latestBeta)
+  let latest = pluginInfo.target
+  const installerTarget = installerUpdateTarget(installed, ctx.installerVersion, latest)
+  if (installerTarget && (!latest || compareVersions(installerTarget, latest) === 1)) {
+    latest = installerTarget
+    pluginInfo = { ...pluginInfo, status: "update-available", target: latest }
+  }
   if (!latest) {
     if (pluginInfo.status === "unknown" || (!latestStable && !latestBeta)) {
       ui.error(`No published version could be determined${ctx.versions.plugin.error ? `: ${ctx.versions.plugin.error}` : "."}`)
@@ -584,7 +615,11 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
       const next = await detectEnvironment(ctx.runtime)
       ctx.detection = next
     }
-    const applied = await maybeApplyBridge(ctx, ctx.detection.spicetify.path, bridgeWasNeeded)
+    // A Spicetify upgrade always ends with an apply offer, even when the
+    // bridge was already healthy: the new CLI build needs an apply to take
+    // effect. maybeApplyBridge keeps the separate apply consent (interactive
+    // prompt, or --apply --yes noninteractively).
+    const applied = await maybeApplyBridge(ctx, ctx.detection.spicetify.path, true)
     if (applied.code !== 0) return applied.code
     renderUpdateSummary(ui, createUpdateSummary({
       plugin: { installed: ctx.detection.opencode.plugin.version ?? installed, target: null, changed: false },
@@ -596,7 +631,7 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
       bridge: {
         synchronized: bridgeWasNeeded,
         applied: applied.applied,
-        pending: bridgeWasNeeded && !applied.applied,
+        pending: !applied.applied,
       },
       nextSteps: ["Restart running OpenCode processes if the bridge was re-applied.", "Playback is not verified by this command."],
     }))

@@ -2,6 +2,7 @@ import { BRIDGE_PORT, MIN_OPENCODE, MIN_SPICETIFY, compareVersions, isAtLeast } 
 import { inspectInstallerLock, installerLockPath } from "./lock.ts"
 import { projectPlugins } from "./opencode.ts"
 import { compatibilityLabel, isSpotifyPluginId } from "./plan.ts"
+import { pluginAvailableUpdate } from "./update-plan.ts"
 import {
   availableUpdate,
   inspectDependencies,
@@ -214,7 +215,7 @@ export async function doctorEnvironment(ctx: OperationContext): Promise<DoctorEn
     port: doctorPort(ctx),
     lock,
     updates: {
-      plugin: availableUpdate(pluginInstalled, ctx.versions.plugin.latest),
+      plugin: pluginAvailableUpdate(pluginInstalled, ctx.versions.plugin.latest, ctx.versions.plugin.latestBeta ?? null),
       spicetify: availableUpdate(d.spicetify.version, ctx.versions.spicetify.latest),
     },
     dependencies: inspectDependencies(ctx.runtime, import.meta.url),
@@ -370,7 +371,7 @@ export async function doctorChecks(ctx: OperationContext): Promise<DoctorCheck[]
   }
 
   const updates = {
-    plugin: availableUpdate(ctx.versions.plugin.installed ?? d.opencode.plugin.version, ctx.versions.plugin.latest),
+    plugin: pluginAvailableUpdate(ctx.versions.plugin.installed ?? d.opencode.plugin.version, ctx.versions.plugin.latest, ctx.versions.plugin.latestBeta ?? null),
     spicetify: availableUpdate(d.spicetify.version, ctx.versions.spicetify.latest),
   }
   const outdated = updates.plugin.available || updates.spicetify.available

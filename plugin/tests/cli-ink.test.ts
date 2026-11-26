@@ -184,8 +184,9 @@ test("toInkView uses compact rules, ASCII fallback markers and bounded rows", ()
   assert.match(text, /\[-\] Clear cache/)
   assert.match(text, /40%/)
   assert.match(text, /\[OK\] Node\.js found/)
-  assert.match(text, /\[x\] OpenCode 2\.4\.1/)
-  assert.match(text, /\[x\] Plugin 0\.6\.0/)
+  assert.match(text, /\[x\] OpenCode 2\.4\.1 \+ Plugin 0\.6\.0/)
+  assert.match(text, /Spotify desktop \+ Spicetify 2\.47\.0/)
+  assert.match(text, /Bridge current \| port free/)
 
   for (const row of view.rows) {
     assert.ok(displayWidth(row.text) <= 40, `row exceeds width: ${row.text}`)
@@ -368,6 +369,51 @@ test("prompt rows show choices, transient input, errors and phrase hints", () =>
   })
   assert.match(render(phrase, 60), /Type "uninstall" to continue:/)
   assert.doesNotMatch(render(phrase, 60), /\[Y\/n\]/)
+})
+
+test("choose footer follows the highlighted selection, not the default index", () => {
+  const choose = baseSnapshot({
+    prompt: {
+      id: "p1",
+      kind: "choose",
+      question: "Mode?",
+      choices: [
+        { label: "Auto", value: "auto" },
+        { label: "Manual", value: "manual" },
+      ],
+      defaultIndex: 0,
+    },
+  })
+  // Highlight moved to the second choice with no typed input: the footer must
+  // offer the highlighted row, not the default.
+  const text = render(choose, 60, { prompt: { id: "p1", input: "", selectedIndex: 1 } })
+  assert.match(text, / 1\. Auto/)
+  assert.match(text, /> 2\. Manual/)
+  assert.match(text, /Enter for 2/)
+})
+
+test("System block is a compact 4-line summary", () => {
+  const view = toInkView(baseSnapshot({ detection }), 72)
+  const system = view.rows.filter((row) => row.kind === "detail").slice(0, 4).map((row) => row.text).join("\n")
+  assert.match(system, /Windows 11 x64 \| Node 24\.12\.0/)
+  assert.match(system, /OpenCode 2\.4\.1 \+ Plugin 0\.6\.0/)
+  assert.match(system, /Spotify desktop \+ Spicetify 2\.47\.0/)
+  assert.match(system, /Bridge current \| port free/)
+})
+
+test("progress rows carry explicit percentages with an ASCII fallback bar", () => {
+  const view = toInkView(
+    baseSnapshot({ progress: { scope: "install", message: "Fetching package", percent: 40 } }),
+    72,
+    { frame: 1 },
+  )
+  const row = view.rows.find((r) => r.kind === "progress")
+  assert.ok(row?.progress, "explicit percentages carry ProgressBar metadata")
+  assert.equal(row!.progress!.percent, 40)
+  assert.equal(row!.progress!.label, "40%")
+  assert.ok(row!.progress!.barWidth >= 4 && row!.progress!.barWidth <= 24)
+  assert.match(row!.text, /40% Fetching package/)
+  assert.match(row!.text, /\[#+-*\] 40%/)
 })
 
 test("key dispatch aborts on Ctrl+C and drives prompt input", async () => {
@@ -677,8 +723,8 @@ test("cancel rows and force hints render while a later prompt stays visible", ()
   assert.doesNotMatch(settled, /press Ctrl\+C again/)
 })
 
-test("activity uses a wide window and limitViewRows pins plan, prompt and hints", () => {
-  assert.ok(MAX_ACTIVITY_ROWS >= 40)
+test("activity uses a compact window and limitViewRows pins plan, prompt and hints", () => {
+  assert.equal(MAX_ACTIVITY_ROWS, 14)
 
   const activity = Array.from({ length: 80 }, (_, index) => ({
     at: index,
@@ -699,7 +745,7 @@ test("activity uses a wide window and limitViewRows pins plan, prompt and hints"
   assert.match(activityRows.at(-1)!.text, /activity line 79/)
   assert.match(view.rows.map((row) => row.text).join("\n"), /Run the verified installer/)
 
-  const limited = limitViewRows(view.rows, 40)
+  const limited = limitViewRows(view.rows, 12)
   const limitedText = limited.map((row) => row.text).join("\n")
   assert.match(limitedText, /Plan - Approval/)
   assert.match(limitedText, /Run the verified installer/)

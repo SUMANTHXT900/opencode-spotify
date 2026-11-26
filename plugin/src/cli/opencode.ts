@@ -691,28 +691,35 @@ export async function inspectOpenCode(runtime: Runtime): Promise<OpenCodeInspect
   const path = primary.path
   const bin = primary.onPath ? "opencode" : primary.path
 
-  let version: string | null = null
-  try {
-    const result = await runtime.run(bin, ["--version"], { timeoutMs: OPERATION_TIMEOUTS.inspection })
-    version = extractVersion(`${result.stdout ?? ""}\n${result.stderr ?? ""}`)
-  } catch {
-    version = null
-  }
+  const listCwd = neutralCwd(runtime)
+  // Startup lag: the four read-only probes are independent, so they run
+  // concurrently instead of sequentially (four timeout budgets back to back).
+  const [versionResult, configResult, listedResult, helpResult] = await Promise.all([
+    runtime.run(bin, ["--version"], { timeoutMs: OPERATION_TIMEOUTS.inspection }).catch(() => null),
+    runtime.run(bin, ["debug", "paths", "config"], { timeoutMs: OPERATION_TIMEOUTS.inspection }).catch(() => null),
+    listPluginsDetailed(runtime, listCwd, bin).catch(
+      (): { entries: PluginListEntry[]; outcome: PluginListOutcome; detail?: string } => ({
+        entries: [],
+        outcome: "failed",
+        detail: "plugin list did not complete",
+      }),
+    ),
+    runtime.run(bin, ["plugin", "--help"], { timeoutMs: OPERATION_TIMEOUTS.inspection }).catch(() => null),
+  ])
+
+  const version = versionResult
+    ? extractVersion(`${versionResult.stdout ?? ""}\n${versionResult.stderr ?? ""}`)
+    : null
 
   let configPath: string | null = null
   let configExists = false
   let configResolved = false
-  try {
-    const result = await runtime.run(bin, ["debug", "paths", "config"], { timeoutMs: OPERATION_TIMEOUTS.inspection })
-    const candidate = firstNonEmptyLine(result.stdout)
-    if (candidate) {
-      const resolved = resolveConfigCandidate(runtime, candidate)
-      configPath = resolved.path
-      configExists = resolved.exists
-      configResolved = true
-    }
-  } catch {
-    configResolved = false
+  const candidate = configResult ? firstNonEmptyLine(configResult.stdout) : null
+  if (candidate) {
+    const resolved = resolveConfigCandidate(runtime, candidate)
+    configPath = resolved.path
+    configExists = resolved.exists
+    configResolved = true
   }
   if (!configResolved) {
     const fallback = discoverConfigFallback(runtime)
@@ -720,45 +727,37 @@ export async function inspectOpenCode(runtime: Runtime): Promise<OpenCodeInspect
     configExists = fallback.exists
   }
 
+  // List from the neutral directory so project-local plugins resolved from
+  // the caller's cwd are not mistaken for the global registration.
+  // B08: a timeout/failed list is "unknown", never proof of "absent".
   let plugin = emptyPlugin()
-  try {
-    // List from a neutral directory so project-local plugins resolved from
-    // the caller's cwd are not mistaken for the global registration.
-    // B08: a timeout/failed list is "unknown", never proof of "absent".
-    const listed = await listPluginsDetailed(runtime, neutralCwd(runtime), bin)
-    if (listed.outcome !== "ok") {
-      plugin = { ...unknownPlugin(), detail: listed.detail }
-    } else {
-      const matches = listed.entries.filter((entry) => isPluginId(entry.id))
-      const match = matches[0]
-      if (match) {
-        const source = match.source.trim() ? unquote(match.source) : ""
-        const local = match.version.trim().toLowerCase() === "local" || isPathLikeSource(source)
-        plugin = {
-          registered: true,
-          version: match.version.trim() || null,
-          source: source || null,
-          local,
-          spec: deriveSpec(match.id, match.version, source),
-          state: "registered",
-          owner: classifyPluginRegistration(match),
-          duplicates: matches.slice(1),
-        }
-      } else {
-        plugin = { ...emptyPlugin(), state: "absent" }
+  if (listedResult.outcome !== "ok") {
+    plugin = { ...unknownPlugin(), detail: listedResult.detail }
+  } else {
+    const matches = listedResult.entries.filter((entry) => isPluginId(entry.id))
+    const match = matches[0]
+    if (match) {
+      const source = match.source.trim() ? unquote(match.source) : ""
+      const local = match.version.trim().toLowerCase() === "local" || isPathLikeSource(source)
+      plugin = {
+        registered: true,
+        version: match.version.trim() || null,
+        source: source || null,
+        local,
+        spec: deriveSpec(match.id, match.version, source),
+        state: "registered",
+        owner: classifyPluginRegistration(match),
+        duplicates: matches.slice(1),
       }
+    } else {
+      plugin = { ...emptyPlugin(), state: "absent" }
     }
-  } catch {
-    plugin = unknownPlugin()
   }
 
   let nativeCommands = false
-  try {
-    const result = await runtime.run(bin, ["plugin", "--help"], { timeoutMs: OPERATION_TIMEOUTS.inspection })
-    const help = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
+  if (helpResult) {
+    const help = `${helpResult.stdout ?? ""}\n${helpResult.stderr ?? ""}`
     nativeCommands = /\badd\b/i.test(help) && /\bremove\b/i.test(help)
-  } catch {
-    nativeCommands = false
   }
 
   return { available: true, path, version, configPath, configExists, plugin, nativeCommands, install }

@@ -114,7 +114,7 @@ test("the wizard never instructs answering a Marketplace prompt; it discloses th
 
   // Rendering shows the same truthful text, with no Marketplace-prompt step.
   const ui = fakeUi()
-  renderOfficialInstallerExplanation(ui, OFFICIAL_INSTALLER, { installedVersion: "2.46.0", latestVersion: "9.9.9" })
+  renderOfficialInstallerExplanation(ui, OFFICIAL_INSTALLER, { installedVersion: "2.46.0", latestVersion: "9.9.9" }, { verbose: true })
   assert.doesNotMatch(text(ui), /Marketplace prompt/i)
   assert.match(text(ui), /Move-OldSpicetifyFolder/)
   assert.match(text(ui), /Authenticode \+ exact version only/)
@@ -385,6 +385,25 @@ test("approved official install asks exactly once and passes the pin to the adap
   assert.match(out, /Installation result/)
   assert.match(out, /ok: Spicetify 2\.46\.7 completed with the pinned official installer\./)
   assert.match(out, /`spicetify apply` remains pending/)
+  assert.doesNotMatch(out, /rerun setup/i, "setup continues automatically; the result must not say rerun setup")
+})
+
+test("the non-effects wall is verbose-only by default", () => {
+  const crisp = fakeUi()
+  renderOfficialInstallerExplanation(crisp, OFFICIAL_INSTALLER, { installedVersion: "2.46.0", latestVersion: "9.9.9" })
+  assert.match(text(crisp), /What it does NOT do:/)
+  assert.match(text(crisp), /Run with --verbose to see all \d+ non-effects\./)
+  assert.doesNotMatch(text(crisp), /Move-OldSpicetifyFolder/, "full wall needs --verbose")
+
+  const full = fakeUi()
+  renderOfficialInstallerExplanation(
+    full,
+    OFFICIAL_INSTALLER,
+    { installedVersion: "2.46.0", latestVersion: "9.9.9" },
+    { verbose: true },
+  )
+  assert.match(text(full), /Move-OldSpicetifyFolder/)
+  assert.doesNotMatch(text(full), /Run with --verbose/)
 })
 
 test("declining the single approval performs no install and reports no changes", async () => {

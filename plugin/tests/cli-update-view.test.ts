@@ -526,7 +526,7 @@ test("plan confirmation forwards question options and presentUpdatePlan reports 
 test("Spicetify guidance adapts to official, manager, and unknown owners", () => {
   const official = spicetifyUpdateGuidance("script")
   assert.equal(official.category, "official")
-  assert.equal(official.command, "spicetify upgrade")
+  assert.equal(official.command, "spicetify-cli upgrade")
   assert.ok(official.lines.some((line) => line.includes(SPICETIFY_MANUAL_URL)))
   assert.ok(official.lines.some((line) => line.includes("do not also run winget, Scoop, or Chocolatey")))
 
@@ -534,7 +534,7 @@ test("Spicetify guidance adapts to official, manager, and unknown owners", () =>
   assert.equal(verified.category, "official")
   assert.equal(verified.command, null)
   assert.match(verified.warning ?? "", /verified flow/)
-  assert.ok(verified.lines.some((line) => line.includes("unverified `spicetify upgrade` self-updater is refused")))
+  assert.ok(verified.lines.some((line) => line.includes("unverified `spicetify-cli upgrade` self-updater is refused")))
 
   const winget = spicetifyUpdateGuidance("winget")
   assert.equal(winget.category, "manager")
@@ -542,11 +542,11 @@ test("Spicetify guidance adapts to official, manager, and unknown owners", () =>
   assert.ok(winget.lines.some((line) => line.includes("Only winget should update it")))
 
   const scoop = spicetifyUpdateGuidance("scoop")
-  assert.equal(scoop.command, "scoop update spicetify")
+  assert.equal(scoop.command, "scoop update spicetify-cli")
   assert.equal(scoop.category, "manager")
 
   const choco = spicetifyUpdateGuidance("choco")
-  assert.equal(choco.command, "choco upgrade spicetify -y")
+  assert.equal(choco.command, "choco upgrade spicetify-cli -y")
   assert.equal(choco.category, "manager")
 
   const unknown = spicetifyUpdateGuidance("unknown")
@@ -572,8 +572,8 @@ test("owner labels and guidance rendering are stable", () => {
   renderSpicetifyGuidance(ui, spicetifyUpdateGuidance("scoop"))
   assert.ok(ui.lines.includes("Spicetify update guidance"))
   assert.ok(ui.lines.includes("Install owner: Scoop"))
-  assert.ok(ui.lines.includes("Upgrade method: Scoop (spicetify)"))
-  assert.ok(ui.lines.includes("Command: scoop update spicetify"))
+  assert.ok(ui.lines.includes("Upgrade method: Scoop (spicetify-cli)"))
+  assert.ok(ui.lines.includes("Command: scoop update spicetify-cli"))
 })
 
 // ---------------------------------------------------------------------------

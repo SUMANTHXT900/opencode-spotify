@@ -1,9 +1,0 @@
-OpenCode Spotify                                                                       v0.6.0-beta.3
-
-│ Bridge check failed
-│ The bridge credential is stale.
-
-  ✕ 401 from 127.0.0.1:43871
-  ▲ restart Spotify, then run setup again
-
-  opencode-spotify doctor --verbose

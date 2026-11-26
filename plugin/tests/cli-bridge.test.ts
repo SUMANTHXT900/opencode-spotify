@@ -238,7 +238,12 @@ test("applyBridge runs fixed spicetify apply", async () => {
   try {
     // Valid backup present: apply runs directly without a backup step.
     const { appdata, local } = await makeDirs(root);
-    await mkdir(join(appdata, "spicetify", "Backup"), { recursive: true });
+    const backupDir = join(appdata, "spicetify", "Backup");
+    await mkdir(backupDir, { recursive: true });
+    // An empty Backup/ is not a valid payload (needs xpui.spa/login.spa at
+    // plausible sizes); create the stock files so no backup step runs.
+    await writeFile(join(backupDir, "xpui.spa"), Buffer.alloc(1_000_000));
+    await writeFile(join(backupDir, "login.spa"), Buffer.alloc(100_000));
     const explicit = createFakeRuntime(root, {
       env: { APPDATA: appdata, LOCALAPPDATA: local },
       which: {},

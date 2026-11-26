@@ -215,6 +215,61 @@ export function assessRepair(ctx: OperationContext): RepairAssessment {
 }
 
 /**
+ * User-requested re-sync when everything already inspects as healthy:
+ * re-provision the owned bridge extension, verify it, then run the separate
+ * apply consent. The plan/apply flow mirrors the normal repair path so a
+ * forced re-sync reports honestly and never claims work it did not do.
+ */
+async function runForcedResync(ctx: OperationContext): Promise<number> {
+  const steps: PlanStep[] = [{
+    id: "repair-bridge",
+    description: "Re-sync the owned bridge extension and Spicetify registration (user-requested; valid credentials reused)",
+    mutates: true,
+    run: async () => {
+      const result = await bridgeOperation(cancelAwareRuntime(ctx.runtime, ctx.cancel), ctx.detection.bridge.credentialValid ? "repair" : "install", {
+        spicetifyPath: ctx.detection.spicetify.path,
+        dryRun: false,
+        yes: true,
+      })
+      if (isCancelledCommand(result)) {
+        throw new OperationCancelled("repair-bridge", "Bridge re-sync was cancelled")
+      }
+      if (result.code !== 0) throw new Error(result.error ?? "Bridge re-sync failed")
+    },
+  }]
+  const repairView = buildRepairView(steps, {
+    dryRun: ctx.options.dryRun,
+    nonInteractive: ctx.options.nonInteractive,
+  })
+  renderRepairNotes(ctx.ui, repairView)
+
+  const outcome = await executePlan(ctx, "Repair plan", steps)
+  if (outcome.status === "cancelled") {
+    reportCancelledPlan(ctx, outcome)
+    return 130
+  }
+  const code = planExitCode(outcome)
+  if (code !== 0) return code
+
+  const next = await detectEnvironment(ctx.runtime)
+  ctx.detection = next
+  if (!next.bridge.installed || next.bridge.registration !== "current") {
+    ctx.ui.error("The bridge is not synchronized after the re-sync. Review `opencode-spotify doctor`.")
+    return 1
+  }
+  const applied = await maybeApplyBridge(ctx, next.spicetify.path, true)
+  if (applied.code !== 0) {
+    reportCancelledApply(ctx, applied.code, applied.applied)
+    return applied.code
+  }
+  ctx.ui.section("Repair summary")
+  ctx.ui.kv("Global plugin", next.opencode.plugin.version ?? "unchanged")
+  ctx.ui.kv("Bridge", applied.applied ? "re-synced and applied" : "re-synced; apply pending")
+  ctx.ui.bullet("Restart running OpenCode processes after repair.")
+  return 0
+}
+
+/**
  * Repair only owned state. Stops without mutating when the registration state
  * is unknown (a failed `plugin list` is not proof of absence), when OpenCode
  * cannot manage plugins, or when the affected component cannot be repaired
@@ -254,6 +309,17 @@ export async function runRepair(ctx: OperationContext): Promise<number> {
       })
       for (const line of renderRepairViewPlain(view)) ui.line(line)
       return 1
+    }
+    // Everything is healthy on disk. In interactive mode offer a forced
+    // re-sync (re-provision the bridge, then apply) instead of only
+    // reporting "nothing to do". Non-interactive and dry-run runs stay
+    // deterministic: no prompt is asked and nothing mutates.
+    if (!ctx.options.nonInteractive && !ctx.options.dryRun && ctx.detection.spicetify.available) {
+      const resync = await ctx.prompt.confirm(
+        "Everything looks installed on disk. Re-sync the bridge and run spicetify apply anyway? [y/N]",
+        { defaultYes: false },
+      )
+      if (resync) return runForcedResync(ctx)
     }
     const view = buildRepairView(steps, {
       dryRun: ctx.options.dryRun,

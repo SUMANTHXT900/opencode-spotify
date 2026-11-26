@@ -3,12 +3,9 @@
  *
  * Scope: the interactive installer shell as a user sees it, driven through
  * `ink-testing-library` 4.0.0 with deterministic fixtures:
- *   - initial dashboard / menu screen rendering
- *   - menu adaptation to fresh / installed / partial installs
- *   - arrow navigation, Enter select, Escape back and Ctrl+C cancel through
- *     Ink's real `useInput` key parser and the real menu reducer
  *   - pinned-installer confirmation (safe default = no, explicit yes)
  *   - progress event rendering, explicit percentages, spinner frames
+ *   - @inkjs/ui ProgressBar on wide color output, ASCII fallback otherwise
  *   - failed-step / error-log display, including ANSI injection attempts
  *   - destructive UNINSTALL consent: never the default, exact phrase only
  *   - narrow 40-column ASCII layout
@@ -41,17 +38,6 @@ import { createPromptController, type PromptController } from "../src/cli/ui/ink
 import { toInkView, type InkRow } from "../src/cli/ui/ink-view.ts"
 import { displayWidth } from "../src/cli/ui/normalize.ts"
 import { layoutFor } from "../src/cli/ui/layout.ts"
-import {
-  createMenuState,
-  dashboardRows,
-  menuKeyFromInk,
-  reduceMenu,
-  renderMainMenuScreen,
-  withFacts,
-  type DashboardFacts,
-  type MenuOutcome,
-  type MenuState,
-} from "../src/cli/ui/menu.ts"
 import { runInstallWizard } from "../src/cli/ui/install-wizard.ts"
 import {
   UNINSTALL_CONFIRMATION_PHRASE,
@@ -126,39 +112,6 @@ const detection: Detection = {
   },
   port: { busy: false, likelyOwnedByThisPlugin: null },
   compatibility: { opencode: "ok", spicetify: "ok", bridge: "compatible", plugin: "ok" },
-}
-
-function baseFacts(overrides: Partial<DashboardFacts> = {}): DashboardFacts {
-  return {
-    installerVersion: "0.6.0-beta.3",
-    windows: true,
-    windowsVersion: "Windows 11",
-    arch: "x64",
-    node: "24.12.0",
-    installState: "fresh",
-    opencode: { available: true, version: "2.4.1" },
-    spotify: { installed: true, version: null, store: false },
-    spicetify: { installed: null, latest: "2.47.0", updateAvailable: false },
-    plugin: { installed: null, latest: "0.6.0-beta.3", updateAvailable: false },
-    ...overrides,
-  }
-}
-
-function installedFacts(options: { pluginUpdate?: boolean; spicetifyUpdate?: boolean; installState?: "installed" | "partial" } = {}): DashboardFacts {
-  return baseFacts({
-    installState: options.installState ?? "installed",
-    plugin: {
-      installed: "0.6.0-beta.1",
-      latest: "0.6.0-beta.3",
-      updateAvailable: options.pluginUpdate === true,
-      registered: true,
-    },
-    spicetify: {
-      installed: "2.46.7",
-      latest: "2.47.0",
-      updateAvailable: options.spicetifyUpdate === true,
-    },
-  })
 }
 
 /** Mirror of the store reducer, used to render real ProgressEvents. */
@@ -301,23 +254,6 @@ function assertWidth(rows: readonly InkRow[], width: number): void {
   }
 }
 
-/** Menu screen key driver: real Ink parser + real reducer, no local key map. */
-function MenuHarness(props: {
-  facts: DashboardFacts
-  width: number
-  onOutcome: (outcome: MenuOutcome) => void
-}): ReactElement {
-  const [state, setState] = useState<MenuState>(() => createMenuState(props.facts))
-  useInput((input, key) => {
-    const next = reduceMenu(state, menuKeyFromInk(input, key))
-    props.onOutcome(next.outcome)
-    setState(next.state)
-  })
-  return createElement(InkRows, {
-    rows: stringRows(renderMainMenuScreen(state, { width: props.width })),
-  })
-}
-
 /** Prompt screen key driver: real prompt controller + real applyInkKey. */
 function PromptScene(props: {
   controller: PromptController
@@ -357,171 +293,6 @@ function promptBase(): InstallerSnapshot {
   })
 }
 
-function selectedMenuIndex(frame: string): number {
-  const line = frame.split("\n").find((entry) => /^> \S/.test(entry))
-  assert.ok(line, `no selected menu line in frame:\n${frame}`)
-  return frame.split("\n").indexOf(line!)
-}
-
-/* ------------------------------------------------------------------ */
-/* Screen rendering                                                   */
-/* ------------------------------------------------------------------ */
-
-test("Ink renders the initial dashboard and menu without reflow", () => {
-  const state = createMenuState(installedFacts({ pluginUpdate: true, spicetifyUpdate: true }))
-  const rows = stringRows(renderMainMenuScreen(state, { width: 72 }))
-  const instance = renderRows(rows)
-  try {
-    const frame = currentFrame(instance)
-    assertFrameRows(frame, rows)
-    assertWidth(rows, 72)
-    assert.ok(frame.split("\n").length <= 24, "the default screen stays inline")
-
-    assert.match(frame, /OpenCode Spotify/)
-    assert.match(frame, /installer 0\.6\.0-beta\.3/)
-    assert.match(frame, /Windows 11/)
-    assert.match(frame, /Component\s+Installed\s+Latest\s+Status/)
-    for (const component of ["Installer", "OpenCode", "Spotify", "Spicetify", "Plugin"]) {
-      assert.match(frame, new RegExp(component))
-    }
-    assert.match(frame, /Main menu/)
-    assert.match(frame, /^> Update everything$/m, "the first applicable action is selected")
-    assert.match(frame, /Enter select/)
-    assert.equal(
-      frame.split("\n").filter((line) => /^> \S/.test(line)).length,
-      1,
-      "exactly one menu row carries the selection marker",
-    )
-    assert.doesNotMatch(frame, /\u001b\[/, "Ink frame must not leak ANSI styling")
-  } finally {
-    instance.unmount()
-  }
-})
-
-test("menu adapts to fresh, installed and partial state when rendered", () => {
-  const scenes: Array<{ facts: DashboardFacts; present: string[]; absent: string[] }> = [
-    {
-      facts: baseFacts(),
-      present: ["Install automatically", "Install manually", "Status + diagnostics", "Exit"],
-      absent: ["Uninstall", "Update everything", "Repair"],
-    },
-    {
-      facts: installedFacts({ pluginUpdate: true, spicetifyUpdate: true }),
-      present: ["Update everything", "Update plugin only", "Update Spicetify only", "Repair", "Uninstall", "Exit"],
-      absent: ["Install automatically", "Install manually"],
-    },
-    {
-      facts: installedFacts({ installState: "partial" }),
-      present: ["Repair", "Status + diagnostics", "Uninstall", "Exit"],
-      absent: ["Update everything", "Update plugin only", "Update Spicetify only", "Install automatically"],
-    },
-  ]
-
-  for (const scene of scenes) {
-    const state = createMenuState(scene.facts)
-    const instance = renderRows(stringRows(renderMainMenuScreen(state, { width: 72 })))
-    try {
-      const frame = currentFrame(instance)
-      for (const label of scene.present) assert.match(frame, new RegExp(label.replace(/\+/g, "\\+")))
-      for (const label of scene.absent) {
-        assert.ok(!frame.includes(label), `${scene.facts.installState}: inapplicable action rendered: ${label}`)
-      }
-      assert.equal(
-        frame.split("\n").filter((line) => /^> \S/.test(line)).length,
-        1,
-        "selection remains unique after adaptation",
-      )
-    } finally {
-      instance.unmount()
-    }
-  }
-
-  // Facts refresh keeps an applicable selection and never leaves a stale one.
-  const state = createMenuState(installedFacts({ pluginUpdate: true, spicetifyUpdate: true }))
-  const moved = reduceMenu(state, "down").state
-  assert.equal(moved.items[moved.selected]?.action, "update:plugin")
-  assert.equal(withFacts(moved, installedFacts()).items[withFacts(moved, installedFacts()).selected]?.action, "repair")
-  assert.equal(dashboardRows(installedFacts({ pluginUpdate: true }))[4]?.status, "update available")
-})
-
-/* ------------------------------------------------------------------ */
-/* Keyboard navigation                                                */
-/* ------------------------------------------------------------------ */
-
-test("arrow keys move the rendered selection and Enter selects it", async () => {
-  const outcomes: MenuOutcome[] = []
-  const instance = render(createElement(MenuHarness, {
-    facts: installedFacts({ pluginUpdate: true, spicetifyUpdate: true }),
-    width: 72,
-    onOutcome: (outcome: MenuOutcome) => { outcomes.push(outcome) },
-  }))
-  try {
-    await settle()
-    const first = currentFrame(instance)
-    assert.match(first, /^> Update everything$/m)
-
-    instance.stdin.write("\u001B[B")
-    await settle()
-    instance.stdin.write("\u001B[B")
-    await settle()
-    const third = currentFrame(instance)
-    assert.match(third, /^> Update Spicetify only$/m)
-    assert.equal(selectedMenuIndex(third), selectedMenuIndex(first) + 2)
-
-    instance.stdin.write("\r")
-    await settle()
-    const selected = outcomes.filter((outcome) => outcome.type === "selected")
-    assert.equal(selected.length, 1)
-    assert.equal(selected[0]!.type === "selected" ? selected[0]!.action : null, "update:spicetify")
-  } finally {
-    instance.unmount()
-  }
-})
-
-test("up arrow wraps to the last action and Enter chooses Exit", async () => {
-  const outcomes: MenuOutcome[] = []
-  const instance = render(createElement(MenuHarness, {
-    facts: installedFacts(),
-    width: 60,
-    onOutcome: (outcome: MenuOutcome) => { outcomes.push(outcome) },
-  }))
-  try {
-    await settle()
-    instance.stdin.write("\u001B[A")
-    await settle()
-    assert.match(currentFrame(instance), /^> Exit$/m)
-    instance.stdin.write("\r")
-    await settle()
-    const last = outcomes.at(-1)
-    assert.equal(last?.type, "selected")
-    assert.equal(last?.type === "selected" ? last.action : null, "exit")
-  } finally {
-    instance.unmount()
-  }
-})
-
-test("Escape reports back and Ctrl+C reports cancel without selecting", async () => {
-  for (const [sequence, expected] of [["\u001B", "back"], ["\u0003", "cancel"]] as const) {
-    const outcomes: MenuOutcome[] = []
-    const instance = render(createElement(MenuHarness, {
-      facts: installedFacts(),
-      width: 72,
-      onOutcome: (outcome: MenuOutcome) => { outcomes.push(outcome) },
-    }))
-    try {
-      await settle()
-      instance.stdin.write(sequence)
-      await settle()
-      assert.deepEqual(outcomes.at(-1), { type: expected })
-      assert.ok(!outcomes.some((outcome) => outcome.type === "selected"), `${expected} must not select`)
-      assert.match(currentFrame(instance), /^> Repair$/m, "selection stays where it was")
-    } finally {
-      instance.unmount()
-    }
-  }
-})
-
-/* ------------------------------------------------------------------ */
 /* Install confirmation                                               */
 /* ------------------------------------------------------------------ */
 

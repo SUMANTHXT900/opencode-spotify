@@ -173,6 +173,15 @@ export async function main(argv: string[], dependencies: MainDependencies = {}):
   let lock: InstallerLock | undefined
   try {
     ui.banner(version, runtime.platform === "win32")
+    // Mutating commands hold the installer lock before the first detection,
+    // so the pre-operation detection runs once (not twice: before + after the
+    // acquire). Read-only commands never touch the lock.
+    const mutating = MUTATING_COMMANDS.has(options.command) && !options.dryRun
+    if (mutating) {
+      lock = dependencies.lock ?? await acquireInstallerLock({ command: options.command })
+      await lock.assertHeld()
+    }
+    const heldLock = lock
     const detection = await detectEnvironment(runtime)
     const versions: { plugin: VersionInfo; spicetify: VersionInfo } = {
       plugin: { installed: detection.opencode.plugin.version, latest: null },
@@ -198,11 +207,13 @@ export async function main(argv: string[], dependencies: MainDependencies = {}):
       inkStore.dispatch({ type: "versions", plugin: versions.plugin, spicetify: versions.spicetify, at: runtime.now() })
       inkStore.dispatch({ type: "phase", phase: "detect", label: "Detected", at: runtime.now() })
     }
-    // Snapshot detection AFTER the registry queries but BEFORE any mutation;
-    // re-detect again once the lock is held (another installer may have run).
-    let ctx: OperationContext = {
+    // Snapshot detection AFTER the registry queries but BEFORE any mutation.
+    // The lock is already held for mutating commands, so no second detection
+    // is needed: the first detection is the pre-operation state.
+    const ctx: OperationContext = {
       options, runtime, ui, prompt, detection, installerVersion: version, versions, log,
       report: presentation?.report, cancel,
+      ...(heldLock ? { guard: async () => { await heldLock.assertHeld() } } : {}),
     }
     const run = async () => {
       if (cancel.requested) return 130
@@ -212,26 +223,7 @@ export async function main(argv: string[], dependencies: MainDependencies = {}):
       }
       return code
     }
-    const mutating = MUTATING_COMMANDS.has(options.command) && !options.dryRun
-    let code: number
-    if (mutating) {
-      lock = dependencies.lock ?? await acquireInstallerLock({ command: options.command })
-      await lock.assertHeld()
-      const heldLock = lock
-      const fresh = await detectEnvironment(runtime)
-      ctx = {
-        ...ctx,
-        detection: fresh,
-        ...(heldLock ? { guard: async () => { await heldLock.assertHeld() } } : {}),
-      }
-      if (inkStore) {
-        inkStore.dispatch({ type: "detection", detection: fresh, at: runtime.now() })
-        inkStore.dispatch({ type: "versions", plugin: ctx.versions.plugin, spicetify: ctx.versions.spicetify, at: runtime.now() })
-      }
-      code = await run()
-    } else {
-      code = await run()
-    }
+    const code = await run()
     // Refresh the Done screen: workflows replace ctx.detection after mutating.
     if (inkStore) {
       try {

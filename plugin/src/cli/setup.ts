@@ -30,7 +30,6 @@ import type { PlanOutcome } from "./plan.ts"
 import { runRepair } from "./repair.ts"
 import { runUninstall } from "./uninstall.ts"
 import { OPERATION_TIMEOUTS, sanitizeDetail } from "./runtime.ts"
-import { runStatus } from "./status.ts"
 import { runUpdate } from "./update.ts"
 import type {
   CommandResult,
@@ -475,7 +474,8 @@ export async function ensureSpicetify(
   // The upstream existing-install prompt cannot be ruled out before preflight,
   // so the warning must reach the single approval screen instead of being
   // dropped. Verification wording follows the reviewed digest ledger.
-  const pin = spicetifyOfficialPin(target?.version ?? null, true, { arch: officialArchToken(runtime) })
+  // `available` reflects current detection: no existing copy means no warning.
+  const pin = spicetifyOfficialPin(target?.version ?? null, ctx.detection.spicetify.available, { arch: officialArchToken(runtime) })
   const progress = (message: string): void => {
     try {
       // Indeterminate only: no fabricated percentages.
@@ -571,6 +571,7 @@ export async function ensureSpicetify(
     method: "official",
     dryRun: false,
     nonInteractive: options.nonInteractive,
+    verbose: options.verbose,
     pin,
     selectionRendered,
     installOfficial: async () => {
@@ -762,8 +763,27 @@ function printPrerequisiteSummary(ctx: OperationContext): void {
   // B23: channel-aware via describePluginUpdate — never advertise an older
   // registry tag as an update; never mislabel a prerelease as stable. Fresh
   // installs register the installer/package version, so no update is shown.
+  // Default is a crisp 3-line summary; --verbose restores the full table.
   const d = ctx.detection
+  const verbose = ctx.options.verbose === true
   ctx.ui.section("Environment")
+  if (!verbose) {
+    ctx.ui.kv("System", d.windows ? `${d.windowsVersion} ${d.arch} | Node ${d.node}` : "unsupported (no changes will be made)")
+    const pluginSummary = d.opencode.plugin.state === "unknown"
+      ? "unknown (inspection failed)"
+      : d.opencode.plugin.registered
+        ? `${d.opencode.plugin.version ?? "unknown"}${d.opencode.plugin.local ? " (local)" : ""}`
+        : "not registered"
+    ctx.ui.kv(
+      "Stack",
+      `OpenCode ${d.opencode.available ? `${d.opencode.version ?? "version unknown"} (${d.compatibility.opencode})` : "not found"} + Plugin ${pluginSummary}`,
+    )
+    ctx.ui.kv(
+      "Services",
+      `Spotify ${d.spotify.installed ? (d.spotify.store ? "store" : "desktop") : "missing"} | Spicetify ${d.spicetify.available ? `${d.spicetify.version ?? "version unknown"} (${d.spicetify.owner})` : "missing"} | Bridge ${d.compatibility.bridge}`,
+    )
+    return
+  }
   ctx.ui.kv("Windows", d.windows ? `${d.windowsVersion} ${d.arch}` : "unsupported (no changes will be made)")
   ctx.ui.kv("Node.js", d.node)
   ctx.ui.kv("OpenCode", d.opencode.available ? `${d.opencode.version ?? "version unknown"} (${d.compatibility.opencode})` : "not found")
@@ -859,27 +879,26 @@ async function maintenance(ctx: OperationContext): Promise<number> {
     return 0
   }
   const choices: { label: string; value: string }[] = []
+  // Single update flow: one entry, auto-selected first whenever anything is
+  // outdated. No both/plugin-only/spicetify-only clutter; the handler maps it
+  // to the achievable backend target.
+  const updateKind = pluginOutdated && spicetifyOutdated ? "both" : pluginOutdated ? "plugin" : spicetifyOutdated ? "spicetify" : null
+  if (updateKind) {
+    const parts: string[] = []
+    if (pluginOutdated && pluginInfo.target) parts.push(`plugin ${detection.opencode.plugin.version ?? "unknown"} -> ${pluginInfo.target}`)
+    if (spicetifyOutdated && spicetifyTarget) parts.push(`Spicetify ${detection.spicetify.version ?? "unknown"} -> ${spicetifyTarget}`)
+    const detail = parts.length ? ` (${parts.join(", ")})` : ""
+    choices.push({ label: `Update to latest${detail}`, value: "update" })
+  }
   if (detection.opencode.plugin.local) choices.push({ label: "Switch this global registration to the published package", value: "switch" })
-  // Unified update/repair experience: adapt to actual state, keep the bridge
-  // synchronized, never mix package managers, never downgrade. "Both" is only
-  // offered when both targets are genuinely achievable.
-  if (pluginOutdated && spicetifyOutdated) choices.push({ label: "Update both OpenCode Spotify and Spicetify", value: "both" })
-  if (pluginOutdated) choices.push({ label: "Update OpenCode Spotify only", value: "plugin" })
-  if (spicetifyOutdated) choices.push({ label: "Update Spicetify only", value: "spicetify" })
   // Repair is always available (including for a local registration); uninstall
   // runs in-process with this same context, so no second installer lock is taken.
-  choices.push({ label: "Repair existing installation", value: "repair" })
-  choices.push({ label: "Continue without updating", value: "continue" })
-  if (detection.opencode.plugin.registered) choices.push({ label: "Uninstall OpenCode Spotify", value: "uninstall" })
+  choices.push({ label: "Repair installation", value: "repair" })
+  if (detection.opencode.plugin.registered) choices.push({ label: "Uninstall", value: "uninstall" })
   choices.push({ label: "Exit", value: "exit" })
   const choice = await ctx.prompt.choose("What would you like to do?", choices)
   if (ctx.cancel.requested) return 130
   if (!choice || choice === "exit") return 0
-  if (choice === "continue") {
-    await runStatus(ctx)
-    ctx.ui.line("  No changes were made.")
-    return 0
-  }
   if (choice === "uninstall") return runUninstall(ctx)
   if (choice === "repair") return runRepair(ctx)
   if (choice === "switch") {
@@ -909,12 +928,13 @@ async function maintenance(ctx: OperationContext): Promise<number> {
     const applied = await maybeApplyBridge(ctx, detection.spicetify.path, detection.bridge.registration !== "current")
     return applied.code
   }
-  if (choice === "both" || choice === "spicetify") ctx.options.allowSpicetifyUpgrade = true
+  if (choice === "both" || choice === "spicetify" || choice === "update") ctx.options.allowSpicetifyUpgrade = true
   // The maintenance choice is the single consent for the selected update; the
   // update plan must not ask again. Apply keeps its separate consent.
   ctx.options.yes = true
   // runUpdate already distinguishes its own cancellation (130) from a real
   // failure (1) and a missing confirmation (2); never override its code.
+  if (choice === "update") return runUpdate(ctx, updateKind ?? "plugin")
   return runUpdate(ctx, choice === "both" ? "both" : choice === "spicetify" ? "spicetify" : "plugin")
 }
 
@@ -1036,15 +1056,15 @@ export async function runSetup(ctx: OperationContext, deps: EnsureSpicetifyDeps 
   const verified = await detectEnvironment(ctx.runtime)
   refresh(ctx, verified)
   if (verified.opencode.plugin.state === "unknown") {
-    ui.error(`Global registration state is unknown (inspection failed: ${verified.opencode.plugin.detail ?? "plugin list did not complete"}). Use \`opencode-spicetify doctor\` for details; no blind retry was attempted.`)
+    ui.error(`Global registration state is unknown (inspection failed: ${verified.opencode.plugin.detail ?? "plugin list did not complete"}). Use \`opencode-spotify doctor\` for details; no blind retry was attempted.`)
     return 1
   }
   if (!verified.opencode.plugin.registered || verified.opencode.plugin.local) {
-    ui.error("Global registration could not be verified. Use `opencode-spicetify doctor` for details.")
+    ui.error("Global registration could not be verified. Use `opencode-spotify doctor` for details.")
     return 1
   }
   if (!verified.bridge.installed || verified.bridge.registration !== "current") {
-    ui.error("The bridge could not be verified after installation. Use `opencode-spicetify repair`.")
+    ui.error("The bridge could not be verified after installation. Use `opencode-spotify repair`.")
     return 1
   }
   // Check cancellation before apply starts, never between apply and verification.

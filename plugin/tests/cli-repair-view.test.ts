@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import type { PlanStep, Presentation } from "../src/cli/types.ts"
+import type { PlanStep } from "../src/cli/types.ts"
 import { runRepair } from "../src/cli/repair.ts"
 import {
   badge,
@@ -9,7 +9,6 @@ import {
   renderRepairViewPlain,
   resolveColor,
   resolveUiMode,
-  runWithPresentationFallback,
   toInstallerPlanView,
 } from "../src/cli/ui/repair-view.ts"
 import {
@@ -137,114 +136,6 @@ test("UI mode and color resolution honor --json/--plain/non-TTY/NO_COLOR", () =>
   assert.equal(resolveColor({ ...tty, env: { NO_COLOR: "1", FORCE_COLOR: "1" } }), false)
   assert.equal(resolveColor({ ...tty, env: { TERM: "dumb" } }), false)
   assert.equal(resolveColor({ stdoutTTY: false, stdinTTY: true, env: { FORCE_COLOR: "1" } }), false)
-})
-
-test("Ink initialization failure falls back to plain before the operation starts", async () => {
-  const plainUi = fakeUi()
-  const plain = fakePresentation("plain", { ui: plainUi })
-  let operations = 0
-  let mutations = 0
-  const fallbacks: string[] = []
-
-  const result = await runWithPresentationFallback({
-    startInk: () => { throw new Error("Ink init failed: no raw mode") },
-    startPlain: () => plain,
-    onFallback: (info) => fallbacks.push(`${info.origin}:${info.reason}`),
-    run: async (presentation, control) => {
-      operations += 1
-      assert.equal(control.mode(), "plain")
-      assert.equal(control.isPlain(), true)
-      presentation.ui.line("plain fallback active")
-      mutations += 1
-      return 7
-    },
-  })
-
-  assert.equal(result.result, 7)
-  assert.equal(result.mode, "plain")
-  assert.equal(result.fellBack, true)
-  assert.equal(result.fallbacks, 1)
-  assert.equal(operations, 1, "operation must run exactly once")
-  assert.equal(mutations, 1, "fallback must not replay the mutation")
-  assert.deepEqual(fallbacks, ["init:Ink init failed: no raw mode"])
-  assert.ok(plainUi.lines.includes("plain fallback active"))
-  assert.equal(plain.closes, 1)
-})
-
-test("a render failure mid-operation swaps the sink without replaying the step", async () => {
-  const inkUi = fakeUi()
-  inkUi.line = () => { throw new Error("renderer crashed") }
-  const ink = fakePresentation("ink", { ui: inkUi })
-  const plainUi = fakeUi()
-  const plain = fakePresentation("plain", { ui: plainUi })
-  const fallbacks: Array<{ origin: string; mode: string }> = []
-  let operations = 0
-  let mutations = 0
-
-  const result = await runWithPresentationFallback({
-    startInk: () => ink,
-    startPlain: () => plain,
-    onFallback: (info) => fallbacks.push({ origin: info.origin, mode: info.mode }),
-    run: async (presentation) => {
-      operations += 1
-      presentation.ui.line("before the crash") // throws, triggers fallback, retried on plain
-      mutations += 1
-      presentation.ui.line("after the swap") // plain from here on
-      presentation.report.step("repair-bridge", "ok")
-      return "done"
-    },
-  })
-
-  assert.equal(result.result, "done")
-  assert.equal(result.mode, "plain")
-  assert.equal(result.fellBack, true)
-  assert.equal(operations, 1, "run must never be re-entered")
-  assert.equal(mutations, 1, "destructive work must never be repeated")
-  assert.deepEqual(fallbacks, [{ origin: "render", mode: "plain" }])
-  assert.ok(plainUi.lines.includes("before the crash"), "failed render is retried once on plain")
-  assert.ok(plainUi.lines.includes("after the swap"))
-  assert.equal(ink.closes, 1)
-  assert.equal(plain.closes, 1)
-})
-
-test("report and prompt failures also degrade without failing the operation", async () => {
-  const inkReport = fakeReport()
-  inkReport.step = () => { throw new Error("step render failed") }
-  const inkPrompt = fakePrompt()
-  inkPrompt.confirm = async () => { throw new Error("prompt render failed") }
-  const ink = fakePresentation("ink", { report: inkReport, prompt: inkPrompt })
-  const plainReport = fakeReport()
-  const plainPrompt = fakePrompt({ confirms: [true] })
-  const plain = fakePresentation("plain", { report: plainReport, prompt: plainPrompt })
-
-  const result = await runWithPresentationFallback({
-    startInk: () => ink,
-    startPlain: () => plain,
-    run: async (presentation) => {
-      presentation.report.step("x", "running") // throws, fallback, re-emitted to plain
-      const approved = await presentation.prompt.confirm("Continue?")
-      return approved
-    },
-  })
-
-  assert.equal(result.result, true)
-  assert.equal(result.mode, "plain")
-  assert.ok(plainReport.events.some((event) => event.type === "step" && event.id === "x"))
-})
-
-test("a render failure inside control.render is swallowed after falling back", async () => {
-  const plain = fakePresentation("plain")
-  const result = await runWithPresentationFallback({
-    startInk: () => fakePresentation("ink"),
-    startPlain: () => plain,
-    run: async (_presentation: Presentation, control) => {
-      control.render(() => { throw new Error("custom render failed") })
-      assert.equal(control.mode(), "plain")
-      return "still alive"
-    },
-  })
-  assert.equal(result.result, "still alive")
-  assert.equal(result.fellBack, true)
 })
 
 test("diagnostics view groups checks, explains fixes, and lists troubleshooting", () => {

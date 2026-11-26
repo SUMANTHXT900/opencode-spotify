@@ -39,6 +39,7 @@ import { reconcileRegistration, removeGlobalPlugin, resolveOpenCodeBinary } from
 import { executePlan, planReporter } from "./plan.ts"
 import { OPERATION_TIMEOUTS, sanitizeDetail } from "./runtime.ts"
 import {
+  SPICETIFY_BACKUP_SIZE_RANGE,
   SPICETIFY_WINGET_ID,
   captureSpotifyAppFiles,
   inspectBackupStateDetailed,
@@ -83,6 +84,8 @@ export interface RestoreVerificationInput {
   layout: SpicetifyLayout
   /** Size of the validated backup xpui.spa, used to compare the restored file. */
   backupXpuiSize: number
+  /** Size of the validated backup login.spa when known. */
+  backupLoginSize?: number | null
   fileSize: (path: string) => number | null
   /** Spotify app-bundle snapshot taken immediately before `spicetify restore`. */
   before?: SpotifyAppSnapshot
@@ -547,12 +550,13 @@ export async function assessBackup(
 }
 
 /**
- * D6: post-restore verification uses the shared Spotify app-file snapshot.
- * The restore is trusted only when the backup is still ready and at least one
- * Spotify app bundle changed. When the app bundles cannot be probed at all
- * (for example a Store layout that exposes no Apps directory), the installed
- * `xpui.spa` is looked up through `spotifyInstallDir` (never through
- * `spotify.path`) and compared with the validated backup size.
+ * D6: post-restore verification checks the stock restored state. The restore
+ * is trusted only when the backup is still valid, the installed xpui.spa and
+ * login.spa exist at the validated backup sizes within
+ * SPICETIFY_BACKUP_SIZE_RANGE, and the extracted mod dirs (Apps\xpui,
+ * Apps\login) are gone. An already-stock rerun stays verified even when no
+ * file changed. The installed spas are looked up through `spotifyInstallDir`
+ * (never through `spotify.path`) and compared with the validated backup size.
  */
 async function defaultVerifyRestore(input: RestoreVerificationInput): Promise<RestoreVerification> {
   const spicetify = input.detection.spicetify
@@ -562,46 +566,116 @@ async function defaultVerifyRestore(input: RestoreVerificationInput): Promise<Re
   if (assessment.state !== "valid") {
     return { ok: false, detail: `the Spicetify backup is no longer valid (${assessment.state})` }
   }
+  const expectedXpui = assessment.xpuiSize ?? input.backupXpuiSize
+  const expectedLogin = assessment.loginSize ?? input.backupLoginSize ?? null
   const installDir = spotifyInstallDir(input.runtime, spicetify)
-  const installedXpui = installDir ? join(installDir, "Apps", "xpui.spa") : null
-  if (input.before) {
-    const after = captureSpotifyAppFiles(input.runtime, spicetify)
-    const verified = verifySpotifyRestoreApplied(input.before, after)
-    if (verified.ok) return { ok: true }
-    const probeUnavailable = input.before.files.every((file) => !file.exists)
-    if (probeUnavailable) {
-      if (!installedXpui) {
-        return {
-          ok: false,
-          detail: "could not locate Spotify's installed xpui.spa to verify the restore; Spicetify config and backups were kept",
-        }
-      }
-      const size = input.fileSize(installedXpui)
-      if (size !== null && size === input.backupXpuiSize) return { ok: true }
-      return {
-        ok: false,
-        detail: `could not locate Spotify's installed xpui.spa to verify the restore (${installedXpui}); Spicetify config and backups were kept`,
-      }
-    }
-    return {
-      ok: false,
-      detail: `${verified.error ?? "the restored Spotify files could not be verified"}; Spicetify config and backups were kept`,
-    }
-  }
-  if (!installedXpui) {
+  if (!installDir) {
     return {
       ok: false,
       detail: "could not locate Spotify's installed xpui.spa to verify the restore; Spicetify config and backups were kept",
     }
   }
-  const size = input.fileSize(installedXpui)
-  if (size !== input.backupXpuiSize) {
-    return {
-      ok: false,
-      detail: `installed xpui.spa (${size ?? "unreadable"} bytes) does not match the backup (${input.backupXpuiSize} bytes); Spicetify config and backups were kept`,
+  const installedXpui = join(installDir, "Apps", "xpui.spa")
+  const installedLogin = join(installDir, "Apps", "login.spa")
+  const checkInstalledSizes = (): RestoreVerification | null => {
+    const xpuiSize = input.fileSize(installedXpui)
+    if (xpuiSize === null) {
+      return {
+        ok: false,
+        detail: `could not locate Spotify's installed xpui.spa to verify the restore (${installedXpui}); Spicetify config and backups were kept`,
+      }
     }
+    const xpuiRange = SPICETIFY_BACKUP_SIZE_RANGE["xpui.spa"]
+    if (xpuiSize < xpuiRange.min || xpuiSize > xpuiRange.max || xpuiSize !== expectedXpui) {
+      return {
+        ok: false,
+        detail: `installed xpui.spa (${xpuiSize} bytes) does not match the backup (${expectedXpui} bytes); Spicetify config and backups were kept`,
+      }
+    }
+    if (expectedLogin !== null && expectedLogin !== undefined) {
+      const loginSize = input.fileSize(installedLogin)
+      if (loginSize === null) {
+        return {
+          ok: false,
+          detail: `could not locate Spotify's installed login.spa to verify the restore (${installedLogin}); Spicetify config and backups were kept`,
+        }
+      }
+      const loginRange = SPICETIFY_BACKUP_SIZE_RANGE["login.spa"]
+      if (loginSize < loginRange.min || loginSize > loginRange.max || loginSize !== expectedLogin) {
+        return {
+          ok: false,
+          detail: `installed login.spa (${loginSize} bytes) does not match the backup (${expectedLogin} bytes); Spicetify config and backups were kept`,
+        }
+      }
+    }
+    return null
   }
+  const checkModDirsGone = (after: SpotifyAppSnapshot): RestoreVerification | null => {
+    const lingering = (after.modDirs ?? []).filter((dir) => dir.exists)
+    if (lingering.length) {
+      return {
+        ok: false,
+        detail: `extracted Spotify app directories still present after restore (${lingering.map((dir) => dir.path).join(", ")}); Spicetify config and backups were kept`,
+      }
+    }
+    return null
+  }
+  if (input.before) {
+    const rawAfter = captureSpotifyAppFiles(input.runtime, spicetify)
+    const after = withInstalledSizes(rawAfter, input.fileSize)
+    const verified = verifySpotifyRestoreApplied(input.before, after, {
+      xpuiSize: expectedXpui,
+      loginSize: expectedLogin,
+    })
+    if (!verified.ok) {
+      const probeUnavailable =
+        input.before.files.every((file) => !file.exists) && (input.before.modDirs ?? []).every((dir) => !dir.exists)
+      if (probeUnavailable) {
+        const installed = checkInstalledSizes()
+        if (installed) return installed
+        const modCheck = checkModDirsGone(after)
+        if (modCheck) return modCheck
+        return { ok: true }
+      }
+      return {
+        ok: false,
+        detail: `${verified.error ?? "the restored Spotify files could not be verified"}; Spicetify config and backups were kept`,
+      }
+    }
+    const installed = checkInstalledSizes()
+    if (installed) return installed
+    const modCheck = checkModDirsGone(after)
+    if (modCheck) return modCheck
+    return { ok: true }
+  }
+  const after = withInstalledSizes(captureSpotifyAppFiles(input.runtime, spicetify), input.fileSize)
+  const modCheck = checkModDirsGone(after)
+  if (modCheck) return modCheck
+  const installed = checkInstalledSizes()
+  if (installed) return installed
   return { ok: true }
+}
+
+function withInstalledSizes(
+  snapshot: SpotifyAppSnapshot,
+  fileSize: (path: string) => number | null,
+): SpotifyAppSnapshot {
+  if (!snapshot.files.length) return snapshot
+  let touched = false
+  const files = snapshot.files.map((file) => {
+    if (file.size !== null) return file
+    let probed: number | null = null
+    try {
+      probed = fileSize(file.path)
+    } catch {
+      probed = null
+    }
+    if (probed === null) return file
+    touched = true
+    return { ...file, size: probed }
+  })
+  if (!touched) return snapshot
+  return { ...snapshot, files, ok: files.every((file) => file.exists) }
 }
 
 export type ManagerRemovalStatus = "removed" | "unverified" | "failed" | "unsupported"
@@ -1642,10 +1716,45 @@ async function runPluginOnly(ctx: OperationContext, deps: Required<UninstallDeps
     for (const detail of residuals.values()) ui.warn(detail)
   }
   ui.bullet("Restart running OpenCode processes so the plugin is unloaded.")
-  if (components.some((component) => component.id === "bridge-extension") || detection.bridge.extensionExists) {
+  const bridgeTouched = components.some((component) => component.id === "bridge-extension") || detection.bridge.extensionExists
+  if (bridgeTouched) {
     if (detection.spicetify.available) {
       ui.bullet("Bridge removed from files/configuration; run spicetify apply to finish removing it from the running Spotify client.")
       ui.bullet("Restart Spotify after applying; until then the running client may keep the old extension active.")
+      if (!ctx.options.dryRun) {
+        const spicetifyPath = detection.spicetify.path ?? "spicetify"
+        if (ctx.options.nonInteractive) {
+          if (ctx.options.apply) {
+            const applied = await ctx.runtime.run(spicetifyPath, ["apply"], {
+              timeoutMs: OPERATION_TIMEOUTS.spicetifyApply,
+            })
+            if (applied.code === 0) {
+              ui.bullet("Ran spicetify apply to finish removing the bridge from Spotify.")
+            } else {
+              ui.warn(`spicetify apply did not complete: ${sanitizeDetail(applied.error ?? applied.stderr ?? "unknown error")}. Run spicetify apply manually, then restart Spotify.`)
+            }
+          }
+        } else {
+          let approved = false
+          try {
+            approved = await ctx.prompt.confirm("Run spicetify apply now to finish removing the bridge from Spotify?", {
+              defaultYes: false,
+            })
+          } catch {
+            approved = false
+          }
+          if (approved) {
+            const applied = await ctx.runtime.run(spicetifyPath, ["apply"], {
+              timeoutMs: OPERATION_TIMEOUTS.spicetifyApply,
+            })
+            if (applied.code === 0) {
+              ui.bullet("Ran spicetify apply to finish removing the bridge from Spotify.")
+            } else {
+              ui.warn(`spicetify apply did not complete: ${sanitizeDetail(applied.error ?? applied.stderr ?? "unknown error")}. Run spicetify apply manually, then restart Spotify.`)
+            }
+          }
+        }
+      }
     } else {
       ui.bullet("Spicetify was not detected, so no registration entry was edited. If Spicetify is installed later, make sure opencode-spotify-bridge.js is not listed in its extensions.")
     }
@@ -1738,6 +1847,7 @@ async function runComplete(
           detection,
           layout,
           backupXpuiSize: backup.xpuiSize ?? 0,
+          backupLoginSize: backup.loginSize ?? null,
           fileSize: deps.fileSize,
           before,
         })
@@ -1778,7 +1888,14 @@ async function runComplete(
   const bridgePresent = detection.bridge.installed ||
     detection.bridge.extensionExists ||
     info.bridgeRegistered
-  if (bridgePresent) {
+  // When restore succeeded (planned) and the full Spicetify config plus
+  // credentials wipe is planned, the bridge file and its registration live
+  // inside the config directory being deleted, so the redundant
+  // install-extension.ps1 -Uninstall PowerShell step is skipped. The bridge
+  // removal is then covered by the spicetify-config deletion below.
+  const fullWipePlanned = plan.configDeletion && detection.bridge.configExists
+  const skipBridgeUninstall = plan.restoreNeeded && fullWipePlanned
+  if (bridgePresent && !skipBridgeUninstall) {
     if (info.available) {
       track({
         id: "remove-bridge",
@@ -2168,7 +2285,7 @@ export async function runUninstall(ctx: OperationContext, deps: UninstallDeps = 
     if (consent === "confirmed") return runComplete(ctx, resolved, scope, backup)
     if (consent === "back") {
       const selected = await selectUninstallMode(ctx.prompt)
-      if (selected === "plugin-only") return runPluginOnly(ctx, resolveDeps(ctx.runtime))
+      if (selected === "plugin-only") return runPluginOnly(ctx, resolved)
       if (selected === "complete") continue
       renderUninstallExit(ui, selected)
       return 130

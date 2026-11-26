@@ -4,11 +4,27 @@ import { parseArgs, helpText } from "../src/cli/args.ts"
 import { BRIDGE_HANDSHAKE, BRIDGE_PORT, BRIDGE_PROTOCOL, MIN_OPENCODE, MIN_SPICETIFY, compareVersions, isAtLeast, isFloatingSpec } from "../src/cli/compat.ts"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { updateAvailability, recommendUpdate, selectPluginTarget } from "../src/cli/update-plan.ts"
+import { updateAvailability, recommendUpdate, selectPluginTarget, pluginAvailableUpdate } from "../src/cli/update-plan.ts"
 import { registrationSpec } from "../src/cli/plan.ts"
 import { npmLatest, githubLatest, compareAvailable } from "../src/cli/versions.ts"
 import { createCancelToken } from "../src/cli/cancel.ts"
 import type { Runtime } from "../src/cli/types.ts"
+
+const originalFetch = globalThis.fetch
+
+/** Stub the registry fetch; records requested URLs so tests prove which path ran. */
+function stubFetch(handler: (url: string) => Response | Promise<Response>): { calls: string[]; restore: () => void } {
+  const calls: string[] = []
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    calls.push(String(input))
+    return handler(String(input))
+  }) as typeof fetch
+  return { calls, restore: () => { globalThis.fetch = originalFetch } }
+}
+
+function failingFetch(message = "network unreachable"): (url: string) => Promise<Response> {
+  return () => Promise.reject(new Error(message))
+}
 
 function runtimeWith(run: Runtime["run"]): Runtime {
   return {
@@ -104,6 +120,9 @@ test("shipped compatibility metadata matches the enforced constants", () => {
 })
 
 test("registry lookups fail closed and parse npm channel tags unchanged", async () => {
+  // Force the npm-view fallback path so no live registry is queried.
+  const stub = stubFetch(failingFetch())
+  try {
   const good = runtimeWith(async () => ({ code: 0, stdout: '{"latest":"0.7.0","beta":"0.8.0-beta.1"}\n', stderr: "" }))
   const version = await npmLatest(good, "opencode-spotify", false)
   assert.equal(version.latest, "0.7.0")
@@ -115,6 +134,91 @@ test("registry lookups fail closed and parse npm channel tags unchanged", async 
   const offline = await npmLatest(good, "opencode-spotify", true)
   assert.equal(offline.latest, null)
   assert.match(offline.error ?? "", /Offline/)
+  } finally {
+    stub.restore()
+  }
+})
+
+test("npmTags queries the registry dist-tags endpoint before spawning npm", async () => {
+  let runs = 0
+  const runtime = runtimeWith(async () => {
+    runs += 1
+    return { code: 0, stdout: '{"latest":"9.9.9"}\n', stderr: "" }
+  })
+  const stub = stubFetch(() => new Response(JSON.stringify({ latest: "0.7.0", beta: "0.8.0-beta.1" }), { status: 200 }))
+  try {
+    const version = await npmLatest(runtime, "opencode-spotify", false)
+    assert.equal(version.latest, "0.7.0")
+    assert.equal(version.latestBeta, "0.8.0-beta.1")
+    assert.equal(runs, 0, "fetch-first must not spawn npm view")
+    assert.equal(stub.calls.length, 1)
+    assert.match(stub.calls[0] ?? "", /dist-tags/)
+  } finally {
+    stub.restore()
+  }
+})
+
+test("npmTags uses npm view when a custom registry mirror is configured", async () => {
+  let runs = 0
+  const runtime = runtimeWith(async () => {
+    runs += 1
+    return { code: 0, stdout: '{"latest":"0.7.0"}\n', stderr: "" }
+  })
+  runtime.env.npm_config_registry = "https://mirror.example.com/"
+  let fetched = 0
+  const stub = stubFetch(() => {
+    fetched += 1
+    return new Response("{}", { status: 200 })
+  })
+  try {
+    const version = await npmLatest(runtime, "opencode-spotify", false)
+    assert.equal(version.latest, "0.7.0")
+    assert.equal(runs, 1, "custom mirrors keep using npm view")
+    assert.equal(fetched, 0, "the public dist-tags endpoint must not be queried for mirrors")
+  } finally {
+    stub.restore()
+  }
+})
+
+test("a cancelled registry fetch never falls back to spawning npm", async () => {
+  let runs = 0
+  const runtime = runtimeWith(async () => {
+    runs += 1
+    return { code: 0, stdout: '{"latest":"0.7.0"}\n', stderr: "" }
+  })
+  const hanging = ((input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const fail = () => reject(new DOMException("Aborted", "AbortError"))
+    if (init?.signal?.aborted) fail()
+    else init?.signal?.addEventListener("abort", fail, { once: true })
+  })) as unknown as typeof fetch
+  globalThis.fetch = hanging
+  try {
+    const token = createCancelToken()
+    const pending = npmLatest(runtime, "opencode-spotify", false, { cancel: token })
+    await Promise.resolve()
+    token.request("user")
+    const tags = await pending
+    assert.equal(tags.latest, null)
+    assert.equal(tags.error, "Cancelled")
+    assert.equal(runs, 0, "no npm view fallback after cancellation")
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test("beta installs report current instead of a false installed-newer warning", () => {
+  // The stable tag (0.5.7) is older than the beta install, but the beta tag
+  // matches: current on its channel, never "installed version is newer".
+  const current = pluginAvailableUpdate("0.6.0-beta.2", "0.5.7", "0.6.0-beta.2")
+  assert.equal(current.status, "current")
+  assert.equal(current.available, false)
+  const outdated = pluginAvailableUpdate("0.6.0", "0.7.0", null)
+  assert.equal(outdated.status, "outdated")
+  assert.equal(outdated.available, true)
+  assert.equal(outdated.latest, "0.7.0")
+  const older = pluginAvailableUpdate("0.7.0", "0.6.0", null)
+  assert.equal(older.status, "downgrade")
+  assert.equal(older.available, false)
 })
 
 // ---- githubLatest: strict stable Spicetify release discovery (F6) ----
@@ -220,6 +324,8 @@ test("githubLatest accepts an options object without a fetcher and honors cancel
 })
 
 test("npm lookups stop at a cancellation boundary", async () => {
+  const stub = stubFetch(failingFetch())
+  try {
   const token = createCancelToken()
   token.request("user")
   let ran = false
@@ -229,6 +335,7 @@ test("npm lookups stop at a cancellation boundary", async () => {
   })
   const tags = await npmLatest(runtime, "opencode-spotify", false, { cancel: token })
   assert.equal(ran, false)
+  assert.equal(stub.calls.length, 0, "a pre-cancelled lookup fetches and spawns nothing")
   assert.equal(tags.latest, null)
   assert.equal(tags.error, "Cancelled")
 
@@ -240,4 +347,7 @@ test("npm lookups stop at a cancellation boundary", async () => {
   const stopped = await npmLatest(midRuntime, "opencode-spotify", false, { cancel: mid })
   assert.equal(stopped.latest, null)
   assert.equal(stopped.error, "Cancelled")
+  } finally {
+    stub.restore()
+  }
 })

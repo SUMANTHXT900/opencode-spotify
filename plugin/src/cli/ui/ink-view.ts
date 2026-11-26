@@ -74,11 +74,11 @@ export interface InkView {
 export const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const
 
 /**
- * B25: the approval/safety section (source URL, revision, SHA-256, size,
- * effects and non-effects) is written as activity entries before the prompt.
- * Keep enough of the window that it can never be truncated before the prompt.
+ * Bounded activity window for the compact inline view. Approval/safety
+ * content lives in activity entries before the prompt; the window keeps the
+ * newest entries while limitViewRows pins plan, prompt and hints.
  */
-export const MAX_ACTIVITY_ROWS = 40
+export const MAX_ACTIVITY_ROWS = 14
 
 /** ASCII markers only. `[x]` for done, never a Unicode check mark. */
 export function spinnerFrame(frame = 0): string {
@@ -260,7 +260,7 @@ export function toPromptRows(
         add(index === selection ? "accent" : "default", `${index === selection ? ">" : " "} ${index + 1}. ${choice.label}${hint}`)
       })
       const fallback = request.choices.length > 0
-        ? ` (Enter for ${clamp(request.defaultIndex, 0, request.choices.length - 1) + 1})`
+        ? ` (Enter for ${clamp(selection, 0, request.choices.length - 1) + 1})`
         : ""
       add("default", `> ${input}_${input.length ? "" : fallback}`)
       break
@@ -285,37 +285,29 @@ function detectionRows(detection: Detection): Array<{ tone: InkTone; text: strin
   const rows: Array<{ tone: InkTone; text: string }> = []
   const add = (ok: boolean, text: string) => rows.push({ tone: ok ? "ok" : "warn", text: `${ok ? "[x]" : "[ ]"} ${text}` })
 
-  add(true, `${detection.windows ? detection.windowsVersion : "Unsupported OS"} | ${detection.arch} | Node ${detection.node}`)
+  // Compact 4-line summary: OS/Node, OpenCode+plugin, Spotify+Spicetify, Bridge.
   add(
-    detection.opencode.available,
-    detection.opencode.available
-      ? `OpenCode ${detection.opencode.version ?? "version unknown"}`
-      : "OpenCode not found",
+    detection.windows,
+    `${detection.windows ? detection.windowsVersion : "Unsupported OS"} ${detection.arch} | Node ${detection.node}`,
   )
   const plugin = detection.opencode.plugin
   add(
-    plugin.registered,
-    plugin.registered
-      ? `Plugin ${plugin.version ?? "version unknown"}${plugin.local ? " (local)" : ""}`
-      : "Plugin not registered",
+    detection.opencode.available,
+    detection.opencode.available
+      ? `OpenCode ${detection.opencode.version ?? "version unknown"} + Plugin ${plugin.registered ? `${plugin.version ?? "version unknown"}${plugin.local ? " (local)" : ""}` : "not registered"}`
+      : "OpenCode not found + Plugin not registered",
   )
+  const spotifyLabel = detection.spotify.installed
+    ? `Spotify ${detection.spotify.store ? "store" : "desktop"}`
+    : "Spotify not installed"
+  const spicetifyLabel = detection.spicetify.available
+    ? `Spicetify ${detection.spicetify.version ?? "version unknown"}`
+    : "Spicetify not installed"
+  add(detection.spotify.installed && detection.spicetify.available, `${spotifyLabel} + ${spicetifyLabel}`)
   add(
-    detection.spotify.installed,
-    detection.spotify.installed
-      ? `Spotify${detection.spotify.store ? " (Store)" : ""}`
-      : "Spotify not installed",
+    detection.bridge.installed && detection.bridge.credentialValid && !detection.port.busy,
+    `Bridge ${detection.bridge.registration}${detection.bridge.credentialValid ? "" : " | credential missing"} | ${detection.port.busy ? "port busy" : "port free"}`,
   )
-  add(
-    detection.spicetify.available,
-    detection.spicetify.available
-      ? `Spicetify ${detection.spicetify.version ?? "version unknown"}`
-      : "Spicetify not installed",
-  )
-  add(
-    detection.bridge.installed && detection.bridge.credentialValid,
-    `Bridge ${detection.bridge.registration}${detection.bridge.credentialValid ? "" : " | credential missing"}`,
-  )
-  add(!detection.port.busy, detection.port.busy ? "Bridge port busy" : "Bridge port free")
   return rows
 }
 

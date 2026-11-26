@@ -109,6 +109,7 @@ function setupContext(
     dryRun?: boolean
     nonInteractive?: boolean
     yes?: boolean
+    verbose?: boolean
     confirms?: boolean[]
     choices?: Array<string | undefined>
     latest?: string | null
@@ -128,6 +129,7 @@ function setupContext(
       dryRun: options.dryRun ?? false,
       nonInteractive: options.nonInteractive ?? false,
       yes: options.yes ?? false,
+      verbose: options.verbose ?? false,
     },
     { spicetify: { latest: options.latest === undefined ? TEST_LATEST : options.latest } },
     report,
@@ -139,7 +141,7 @@ function setupContext(
 
 test("official install succeeds through the wizard with a single approval and no fabricated percentages", async () => {
   const runtime = officialRuntime()
-  const { ctx, ui, prompt, hooks, report } = setupContext(runtime)
+  const { ctx, ui, prompt, hooks, report } = setupContext(runtime, { verbose: true })
   const captures: Capture[] = []
   const deps = fakeInstaller(runtime, captures, { installedVersion: TEST_LATEST, stdout: "installed" })
   assert.equal(await ensureSpicetify(ctx, deps), "ready", ui.lines.join("\n"))
@@ -546,14 +548,14 @@ test("maintenance offers repair and uninstall and hides inapplicable updates whe
   })
   assert.equal(await runSetup(ctx), 0, ui.lines.join("\n"))
   const labels = offered(capture)
-  assert.ok(labels.includes("Repair existing installation"), labels.join("\n"))
-  assert.ok(labels.includes("Uninstall OpenCode Spotify"), labels.join("\n"))
+  assert.ok(labels.includes("Repair installation"), labels.join("\n"))
+  assert.ok(labels.includes("Uninstall"), labels.join("\n"))
   assert.ok(!labels.some((label) => /^Update /.test(label)), `no inapplicable updates:\n${labels.join("\n")}`)
   assert.match(ui.lines.join("\n"), /Everything detected is current/i)
   assert.ok(!ui.lines.join("\n").includes("unknown (current)"), "never renders unknown (current)")
 })
 
-test("maintenance offers plugin-only update and hides Spicetify options it cannot achieve", async () => {
+test("maintenance offers a single update entry and hides per-target clutter", async () => {
   const runtime = fakeRuntime()
   const { ctx, capture } = menuContext(runtime, "exit", {
     pluginInstalled: "0.6.0",
@@ -563,14 +565,15 @@ test("maintenance offers plugin-only update and hides Spicetify options it canno
   })
   assert.equal(await runSetup(ctx), 0)
   const labels = offered(capture)
-  assert.ok(labels.includes("Update OpenCode Spotify only"), labels.join("\n"))
+  assert.ok(labels.some((label) => label.startsWith("Update to latest")), labels.join("\n"))
   assert.ok(!labels.includes("Update both OpenCode Spotify and Spicetify"), labels.join("\n"))
+  assert.ok(!labels.includes("Update OpenCode Spotify only"), labels.join("\n"))
   assert.ok(!labels.includes("Update Spicetify only"), labels.join("\n"))
-  assert.ok(labels.includes("Repair existing installation"))
-  assert.ok(labels.includes("Uninstall OpenCode Spotify"))
+  assert.ok(labels.includes("Repair installation"))
+  assert.ok(labels.includes("Uninstall"))
 })
 
-test("maintenance offers Spicetify-only when the owner-safe target differs", async () => {
+test("maintenance offers the single update entry for Spicetify-only updates", async () => {
   const runtime = fakeRuntime()
   const { ctx, capture } = menuContext(runtime, "exit", {
     pluginInstalled: "0.6.0",
@@ -580,9 +583,10 @@ test("maintenance offers Spicetify-only when the owner-safe target differs", asy
   })
   assert.equal(await runSetup(ctx), 0)
   const labels = offered(capture)
-  assert.ok(labels.includes("Update Spicetify only"), labels.join("\n"))
+  assert.ok(labels.some((label) => label.startsWith("Update to latest")), labels.join("\n"))
   assert.ok(!labels.includes("Update both OpenCode Spotify and Spicetify"), labels.join("\n"))
   assert.ok(!labels.includes("Update OpenCode Spotify only"), labels.join("\n"))
+  assert.ok(!labels.includes("Update Spicetify only"), labels.join("\n"))
 })
 
 test("maintenance hides Spicetify updates when latest is a prerelease or unknown", async () => {
@@ -596,10 +600,10 @@ test("maintenance hides Spicetify updates when latest is a prerelease or unknown
     })
     assert.equal(await runSetup(ctx), 0)
     const labels = offered(capture)
-    assert.ok(!labels.includes("Update Spicetify only"), `${latest}: ${labels.join("\n")}`)
+    assert.ok(!labels.some((label) => label.startsWith("Update to latest")), `${latest}: ${labels.join("\n")}`)
     assert.ok(!labels.includes("Update both OpenCode Spotify and Spicetify"), `${latest}: ${labels.join("\n")}`)
-    assert.ok(labels.includes("Repair existing installation"))
-    assert.ok(labels.includes("Uninstall OpenCode Spotify"))
+    assert.ok(labels.includes("Repair installation"))
+    assert.ok(labels.includes("Uninstall"))
     const text = ui.lines.join("\n")
     assert.ok(!text.includes("unknown (current)"), text)
     assert.match(text, /latest unknown/i)
@@ -617,8 +621,8 @@ test("maintenance offers repair and uninstall for a local registration too", asy
   assert.equal(await runSetup(ctx), 0)
   const labels = offered(capture)
   assert.ok(labels.includes("Switch this global registration to the published package"), labels.join("\n"))
-  assert.ok(labels.includes("Repair existing installation"), labels.join("\n"))
-  assert.ok(labels.includes("Uninstall OpenCode Spotify"), labels.join("\n"))
+  assert.ok(labels.includes("Repair installation"), labels.join("\n"))
+  assert.ok(labels.includes("Uninstall"), labels.join("\n"))
 })
 
 test("maintenance uninstall runs in-process with the same context (no second lock)", async () => {
@@ -636,7 +640,7 @@ test("maintenance uninstall runs in-process with the same context (no second loc
 
 test("maintenance update uses the menu choice as the single consent", async () => {
   const runtime = fakeRuntime()
-  const { ctx, prompt, capture } = menuContext(runtime, "plugin", {
+  const { ctx, prompt, capture } = menuContext(runtime, "update", {
     pluginInstalled: "0.6.0",
     pluginLatest: "0.6.1",
   })
@@ -692,23 +696,40 @@ test("digest verification is claimed only for reviewed x64 releases", () => {
   assert.ok(arm64.nots.some((line) => /x64-only/.test(line)))
 })
 
-test("material installer warnings reach the single approval screen without --verbose", async () => {
+test("material installer warnings reach the single approval screen with --verbose", async () => {
   const runtime = officialRuntime()
-  const { ctx, ui, prompt } = setupContext(runtime)
+  const { ctx, ui, prompt } = setupContext(runtime, { verbose: true })
   const captures: Capture[] = []
   const deps = fakeInstaller(runtime, captures, { installedVersion: TEST_LATEST })
   assert.equal(await ensureSpicetify(ctx, deps), "ready", ui.lines.join("\n"))
   const text = ui.lines.join("\n")
 
-  assert.ok(text.includes(EXISTING_INSTALL_PROMPT_WARNING), `existing-install warning missing:\n${text}`)
   assert.match(text, /permanently delete `%USERPROFILE%\\spicetify-cli`/, text)
   assert.match(text, /%TEMP%\\spicetify\.zip/, text)
   assert.match(text, /x64-only/, text)
+  assert.match(text, /execution policy/, text)
+  assert.match(text, /Marketplace/i, text)
+  assert.match(text, /removed from the staged script/i, text)
   // The patch removes the Marketplace branch: never instruct an answer for it.
   assert.doesNotMatch(text, /Marketplace[^.]*answer No/i, text)
+  // A missing Spicetify means no existing-install prompt is possible: the
+  // warning is scoped to detected installs (see the pin unit test below).
+  assert.ok(!text.includes(EXISTING_INSTALL_PROMPT_WARNING), `unexpected existing-install warning:\n${text}`)
   // Single consent is preserved.
   assert.equal(prompt.asked.filter((line) => /Run the pinned official installer/i.test(line)).length, 1)
   assert.equal(captures.length, 1)
+})
+
+test("the default approval screen is crisp; the full wall needs --verbose", async () => {
+  const runtime = officialRuntime()
+  const { ctx, ui } = setupContext(runtime)
+  const deps = fakeInstaller(runtime, [], { installedVersion: TEST_LATEST })
+  assert.equal(await ensureSpicetify(ctx, deps), "ready", ui.lines.join("\n"))
+  const text = ui.lines.join("\n")
+  assert.match(text, /Run with --verbose to see all \d+ non-effects\./)
+  assert.match(text, /Marketplace/i, "the core effect stays visible")
+  assert.ok(!text.includes("permanently delete `%USERPROFILE%\\spicetify-cli`"), `full wall leaked:\n${text}`)
+  assert.ok(!text.includes("%TEMP%\\spicetify.zip"), `full wall leaked:\n${text}`)
 })
 
 // ---------------------------------------------------------------------------
@@ -738,7 +759,7 @@ test("maintenance switch keeps a real failure (1) when cancellation is requested
 
 test("maintenance update keeps a real failure (1) when cancellation is requested", async () => {
   const runtime = fakeRuntime()
-  const { ctx, ui } = menuContext(runtime, "plugin", {
+  const { ctx, ui } = menuContext(runtime, "update", {
     pluginInstalled: "0.6.0",
     pluginLatest: "0.6.1",
     yes: true,

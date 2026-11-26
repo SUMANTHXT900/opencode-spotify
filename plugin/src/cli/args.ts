@@ -112,7 +112,6 @@ Options:
   --spicetify <mode>        ask (default), auto, manual, or skip
   --apply                   Run spicetify apply after bridge preparation (confirm separately)
   --allow-spicetify-upgrade Permit a combined Spicetify CLI update
-  --accept-older-winget     Deprecated no-op (retained for compatibility; Winget flow retired)
   --remove-credentials      Separately confirmed credential removal on uninstall
   --complete                Complete removal: interactive typed UNINSTALL, or --non-interactive + --yes
   --package-spec <spec>     Override the npm spec used for global registration

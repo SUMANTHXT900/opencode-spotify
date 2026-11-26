@@ -29,7 +29,6 @@ import { officialScriptBytes } from "./release-fixture.ts"
 import { removeCredentials } from "../src/cli/bridge.ts"
 import { sanitizeDetail } from "../src/cli/runtime.ts"
 import { sanitizeMessage } from "../src/cli/state.ts"
-import { sanitizeErrorDetail, sanitizeLogMessage } from "../src/cli/ui/progress-view.ts"
 import {
   COMPLETE_CONSENT_ATTEMPTS,
   UNINSTALL_CONFIRMATION_PHRASE,
@@ -45,6 +44,10 @@ const CONFIG_DIR = "C:\\Users\\Test\\AppData\\Roaming\\spicetify"
 const CONFIG_BACKUP_DIR = `${CONFIG_DIR}\\Backup`
 const CREDENTIAL_DIR = "C:\\Users\\Test\\AppData\\Roaming\\opencode-spotify"
 const INSTALLED_XPUI = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\xpui.spa"
+const INSTALLED_LOGIN = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\login.spa"
+const MOD_XPUI_DIR = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\xpui"
+const MOD_LOGIN_DIR = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps\\login"
+const SPOTIFY_APPS_DIR = "C:\\Users\\Test\\AppData\\Roaming\\Spotify\\Apps"
 
 /** 64 hex characters: the bridge signing-secret shape. */
 const SECRET = "9f".repeat(32)
@@ -72,6 +75,8 @@ function installBackup(runtime: FakeRuntime, options: {
   xpui?: SizeSpec
   login?: SizeSpec
   installedXpui?: number | "missing"
+  /** Installed Spotify login.spa size; "missing" simulates an unverifiable restore. */
+  installedLogin?: number | "missing"
 } = {}) {
   const directory = CONFIG_BACKUP_DIR
   // Plausible payload sizes for the current backup-size policy. Tests that
@@ -81,8 +86,35 @@ function installBackup(runtime: FakeRuntime, options: {
   const sizes = new Map<string, number>()
   const realExists = runtime.exists.bind(runtime)
   const realIsFile = runtime.isFile.bind(runtime)
-  runtime.exists = (path: string) => files.has(path) || path === directory || realExists(path)
-  runtime.isFile = (path: string) => files.has(path) || realIsFile(path)
+  const realListDir = (runtime as FakeRuntime & { listDir?: (path: string) => string[] | null }).listDir?.bind(runtime)
+  const norm = (value: string) => value.toLowerCase().replace(/[\\/]+$/, "")
+  runtime.exists = (path: string) => {
+    if (norm(path) === norm(MOD_XPUI_DIR) || norm(path) === norm(MOD_LOGIN_DIR)) return false
+    if (files.has(path)) return true
+    if (path === directory) return true
+    return realExists(path)
+  }
+  runtime.isFile = (path: string) => {
+    if (norm(path) === norm(MOD_XPUI_DIR) || norm(path) === norm(MOD_LOGIN_DIR)) return false
+    if (files.has(path)) return true
+    return realIsFile(path)
+  }
+  ;(runtime as FakeRuntime & { listDir?: (path: string) => string[] | null }).listDir = (path: string) => {
+    if (norm(path) === norm(SPOTIFY_APPS_DIR)) {
+      const entries: string[] = []
+      if (files.has(INSTALLED_XPUI)) entries.push("xpui.spa")
+      if (files.has(INSTALLED_LOGIN)) entries.push("login.spa")
+      return entries
+    }
+    if (realListDir) {
+      try {
+        return realListDir(path)
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
 
   const add = (path: string, spec: SizeSpec): void => {
     if (spec === "missing") return
@@ -93,6 +125,10 @@ function installBackup(runtime: FakeRuntime, options: {
   add(`${directory}\\login.spa`, options.login ?? 200_000)
   if (options.installedXpui !== "missing") {
     add(INSTALLED_XPUI, options.installedXpui ?? (typeof xpui === "number" ? xpui : 5_000_000))
+  }
+  if (options.installedLogin !== "missing") {
+    const login = options.login ?? 200_000
+    add(INSTALLED_LOGIN, typeof login === "number" ? login : 200_000)
   }
   return { directory, fileSize: (path: string) => sizes.get(path) ?? null }
 }
@@ -156,6 +192,20 @@ function completeContext(runtime: FakeRuntime, ui: ReturnType<typeof fakeUi>) {
 // ---------------------------------------------------------------------------
 // Pure sanitizers
 // ---------------------------------------------------------------------------
+
+/** Local replacements for the removed progress-view sanitizers (same contract). */
+const sanitizeLogMessage = (value: string): string =>
+  sanitizeDetail(
+    value
+      .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
+  ).replace(/\s*\r?\n\s*/g, " | ").trim()
+const sanitizeErrorDetail = (value: string): string =>
+  sanitizeDetail(
+    value
+      .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
+  ).replace(/\s+/g, " ").trim() || "The step failed without a reason."
 
 test("every sanitizer redacts signing secrets, tokens, userinfo, e-mail and home paths", () => {
   const detail = sanitizeDetail(

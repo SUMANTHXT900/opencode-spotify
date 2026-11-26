@@ -235,6 +235,45 @@ test("repair re-registers and repairs only owned components", async () => {
   assert.ok(!commands.some((command) => command.includes("spicetify upgrade")))
 })
 
+test("healthy interactive repair offers a re-sync and applies on yes", async () => {
+  const runtime = fakeRuntime()
+  const prompt = fakePrompt({ confirms: [true, true, true] })
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, prompt, { command: "repair" })
+  ctx.detection = fakeDetection(runtime)
+  assert.equal(await runRepair(ctx), 0, ui.lines.join("\n"))
+  const cmds = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
+  assert.ok(prompt.asked.some((question) => question.includes("Re-sync the bridge")), prompt.asked.join("\n"))
+  assert.ok(cmds.some((command) => command.includes("install-extension.ps1") && command.includes("-Repair")))
+  assert.ok(cmds.some((command) => command.endsWith("spicetify.exe apply")))
+})
+
+test("healthy interactive repair stays read-only when the re-sync offer is declined", async () => {
+  const runtime = fakeRuntime()
+  const prompt = fakePrompt({ confirms: [false] })
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, prompt, { command: "repair" })
+  ctx.detection = fakeDetection(runtime)
+  assert.equal(await runRepair(ctx), 0, ui.lines.join("\n"))
+  assert.ok(prompt.asked.some((question) => question.includes("Re-sync the bridge")), prompt.asked.join("\n"))
+  assert.equal(runtime.calls.length, 0, "declining the re-sync must not mutate")
+})
+
+test("healthy repair never prompts in non-interactive or dry-run mode", async () => {
+  for (const options of [
+    { command: "repair", nonInteractive: true },
+    { command: "repair", dryRun: true },
+  ] as const) {
+    const runtime = fakeRuntime()
+    const prompt = fakePrompt({ confirms: [true] })
+    const ctx = context(runtime, fakeUi(), prompt, { ...options })
+    ctx.detection = fakeDetection(runtime)
+    assert.equal(await runRepair(ctx), 0, JSON.stringify(options))
+    assert.deepEqual(prompt.asked, [], `${JSON.stringify(options)} must stay deterministic`)
+    assert.equal(runtime.calls.length, 0, `${JSON.stringify(options)} must not mutate`)
+  }
+})
+
 test("uninstall removes only the registration and owned bridge, keeping credentials by default", async () => {
   const runtime = fakeRuntime()
   // A real bridge.json always implies its credential directory exists.

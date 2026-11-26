@@ -313,9 +313,9 @@ export function createInkApp(
     const glyphs = glyphsFor(layout)
     const theme = staticTheme
     const terminalRows = typeof size?.rows === "number" && Number.isFinite(size.rows) ? size.rows : 24
-    // B25: never shrink below the approval window (URL/SHA/effects live in
-    // activity) and never trim the prompt/plan (limitViewRows pins them).
-    const height = Math.max(40, terminalRows - 4)
+    // Compact inline region: keep the prompt/plan pinned without reserving a
+    // full-screen budget on small terminals.
+    const height = Math.max(10, terminalRows - 2)
     const active = deps.controller.getActive()
     const promptState: InkPromptState | undefined = active
       ? {

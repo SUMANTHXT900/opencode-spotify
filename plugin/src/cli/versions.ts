@@ -63,14 +63,70 @@ export async function npmTags(
   options: VersionLookupOptions = {},
 ): Promise<{ latest?: string | null; beta?: string | null; error?: string }> {
   if (offline) return { latest: null, beta: null, error: "Offline mode: registry not queried" }
-  // Boundary check before spawning a package manager.
+  // Boundary check before any network or child process.
   if (options.cancel?.requested) return { latest: null, beta: null, error: "Cancelled" }
+  // A custom registry mirror (npm_config_registry) may not serve the public
+  // dist-tags endpoint: skip the direct fetch and use `npm view` (which
+  // honors the configured registry) instead.
+  const customRegistry = runtime.env.npm_config_registry ?? runtime.env.NPM_CONFIG_REGISTRY
+  if (!customRegistry) {
+    const fetched = await fetchNpmDistTags(packageName, options.cancel)
+    if (fetched.cancelled) return { latest: null, beta: null, error: "Cancelled" }
+    if (fetched.tags) return fetched.tags
+  }
+  return npmViewTags(runtime, packageName, options.cancel)
+}
+
+/**
+ * Query the npm registry dist-tags endpoint directly (no child process, no
+ * shell). Returns `{ tags }` on success, `{ tags: null }` when the caller
+ * should fall back to `npm view`, and `{ cancelled: true }` when the
+ * operation was cancelled (never fall back after cancellation: spawning a
+ * child post-cancel would violate the cancellation boundary).
+ */
+async function fetchNpmDistTags(
+  packageName: string,
+  cancel?: CancelToken,
+): Promise<{ tags?: { latest?: string | null; beta?: string | null } | null; cancelled?: boolean }> {
+  try {
+    const fetcher = globalThis.fetch
+    if (typeof fetcher !== "function") return { tags: null }
+    const response = await fetcher(`https://registry.npmjs.org/-/package/${encodeURIComponent(packageName)}/dist-tags`, {
+      headers: { Accept: "application/json", "User-Agent": "opencode-spotify-installer" },
+      signal: lookupSignal(RELEASE_TIMEOUT_MS, cancel),
+    })
+    if (cancel?.requested) return { cancelled: true }
+    if (!response.ok) return { tags: null }
+    const parsed: unknown = await response.json()
+    if (cancel?.requested) return { cancelled: true }
+    if (!parsed || typeof parsed !== "object") return { tags: null }
+    const record = parsed as Record<string, unknown>
+    return {
+      tags: {
+        latest: typeof record.latest === "string" ? cleanVersion(record.latest) : null,
+        beta: typeof record.beta === "string" ? cleanVersion(record.beta) : null,
+      },
+    }
+  } catch (error) {
+    if (cancel?.requested) return { cancelled: true }
+    // AbortError without a requested cancellation is the registry timeout:
+    // fall back to `npm view` rather than reporting failure immediately.
+    void error
+    return { tags: null }
+  }
+}
+
+async function npmViewTags(
+  runtime: Runtime,
+  packageName: string,
+  cancel?: CancelToken,
+): Promise<{ latest?: string | null; beta?: string | null; error?: string }> {
   const result = await runtime.run("npm", ["view", packageName, "dist-tags", "--json"], {
     timeoutMs: OPERATION_TIMEOUTS.registry,
     killPolicy: "tree",
-    ...(options.cancel ? { cancel: options.cancel } : {}),
+    ...(cancel ? { cancel } : {}),
   })
-  if (options.cancel?.requested || result.cancelled) return { latest: null, beta: null, error: "Cancelled" }
+  if (cancel?.requested || result.cancelled) return { latest: null, beta: null, error: "Cancelled" }
   if (result.code !== 0) {
     const detail = result.stderr.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "npm registry unavailable"
     return { latest: null, beta: null, error: safeError(detail) }

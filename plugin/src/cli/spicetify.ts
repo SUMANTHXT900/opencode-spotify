@@ -96,6 +96,14 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
   if (joined.includes("\\microsoft\\winget\\packages\\") ||
     joined.includes("\\microsoft\\winget\\links\\") ||
     joined.includes("\\winget\\links\\")) return "winget";
+  // A script-owned copy must sit in the canonical %LOCALAPPDATA%\spicetify
+  // directory. Other local paths (e.g. %LOCALAPPDATA%\Programs\spicetify)
+  // are not ours to upgrade or delete. Checked before the slow manager
+  // probes so a canonical script install never pays for winget/scoop/choco.
+  const canonicalScriptDir = stripTrailingSep(localAppDataDir(runtime)).toLowerCase() + "\\spicetify";
+  try {
+    if (stripTrailingSep(dirname(spicetifyExe)).toLowerCase() === canonicalScriptDir) return "script";
+  } catch { /* unparseable path stays unknown */ }
   // Bounded manager probes. All argv arrays, no shell strings.
   try {
     const winget = await runtime.which("winget");
@@ -132,13 +140,6 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
       } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
-  // A script-owned copy must sit in the canonical %LOCALAPPDATA%\spicetify
-  // directory. Other local paths (e.g. %LOCALAPPDATA%\Programs\spicetify)
-  // are not ours to upgrade or delete.
-  const canonicalScriptDir = stripTrailingSep(localAppDataDir(runtime)).toLowerCase() + "\\spicetify";
-  try {
-    if (stripTrailingSep(dirname(spicetifyExe)).toLowerCase() === canonicalScriptDir) return "script";
-  } catch { /* unparseable path stays unknown */ }
   // Keep MIN_SPICETIFY referenced so version policy stays shared.
   void MIN_SPICETIFY;
   return "unknown";
@@ -168,7 +169,7 @@ export async function inspectSpotify(runtime: Runtime): Promise<SpotifyInfo> {
     exeExists = false;
   }
   if (prefsExists || exeExists) {
-    const path = exeExists ? desktopExe : desktopExe;
+    const path = exeExists ? desktopExe : prefs;
     return {
       installed: true,
       store: false,
@@ -302,13 +303,6 @@ export async function inspectSpicetify(runtime: Runtime): Promise<SpicetifyInfo>
     version = extractVersion(`${result.stdout}\n${result.stderr}`);
   } catch {
     version = null;
-  }
-
-  // Best-effort `spicetify path` probe (read-only, fixed argv).
-  try {
-    await runtime.run(exe, ["path"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
-  } catch {
-    // Optional; config resolution below is authoritative.
   }
 
   let configPath: string | null = null;
@@ -718,21 +712,38 @@ export interface SpotifyAppFileInfo {
   mtimeMs: number | null;
 }
 
+export interface SpotifyModDirInfo {
+  path: string;
+  exists: boolean;
+}
+
 export interface SpotifyAppSnapshot {
   ok: boolean;
   appsDir: string | null;
   files: SpotifyAppFileInfo[];
+  modDirs: SpotifyModDirInfo[];
   error?: string;
 }
 
 export interface SpotifyAppProbeDeps {
   fileInfo?: (path: string) => { size: number; mtimeMs: number } | null;
+  /** Directory-existence probe for the extracted mod dirs. Return null when unknown. */
+  dirExists?: (path: string) => boolean | null;
+  /** Directory listing probe used to detect extracted mod dirs. Return null when unreadable. */
+  listDir?: (path: string) => string[] | null;
 }
 
-const SPOTIFY_APP_PROBES = [
-  { id: "xpui", name: "xpui-modules.js" },
-  { id: "login", name: "login.js" },
+export interface ExpectedBackupSizes {
+  xpuiSize?: number | null;
+  loginSize?: number | null;
+}
+
+const SPOTIFY_SPA_FILES = [
+  { id: "xpui", file: "xpui.spa" },
+  { id: "login", file: "login.spa" },
 ] as const;
+
+const SPOTIFY_MOD_DIR_IDS = ["xpui", "login"] as const;
 
 function defaultAppFileInfo(path: string): { size: number; mtimeMs: number } | null {
   try {
@@ -749,7 +760,17 @@ export function spotifyInstallDir(runtime: Runtime, spicetify: SpicetifyInfo): s
     if (spicetify.configPath && runtime.exists(spicetify.configPath)) {
       const text = runtime.readText(spicetify.configPath);
       const match = text.match(/^\s*spotify_path\s*=\s*(.+?)\s*$/mi);
-      if (match?.[1]) return match[1].trim();
+      if (match?.[1]) {
+        let raw = match[1].trim();
+        if (raw.length >= 2) {
+          const first = raw[0];
+          const last = raw[raw.length - 1];
+          if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+            raw = raw.slice(1, -1).trim();
+          }
+        }
+        if (raw) return raw;
+      }
     }
   } catch {
     // Fall back to the documented roaming default.
@@ -762,7 +783,7 @@ export function spotifyAppsDir(runtime: Runtime, spicetify: SpicetifyInfo): stri
   return installDir ? join(installDir, "Apps") : null;
 }
 
-/** Snapshot the two representative Spotify app bundles before/after restore. */
+/** Snapshot the stock Spotify app bundles (xpui.spa/login.spa) plus extracted mod dirs. */
 export function captureSpotifyAppFiles(
   runtime: Runtime,
   spicetify: SpicetifyInfo,
@@ -770,11 +791,11 @@ export function captureSpotifyAppFiles(
 ): SpotifyAppSnapshot {
   const appsDir = spotifyAppsDir(runtime, spicetify);
   if (!appsDir) {
-    return { ok: false, appsDir: null, files: [], error: "The Spotify apps directory could not be resolved." };
+    return { ok: false, appsDir: null, files: [], modDirs: [], error: "The Spotify apps directory could not be resolved." };
   }
   const fileInfo = deps.fileInfo ?? defaultAppFileInfo;
-  const files: SpotifyAppFileInfo[] = SPOTIFY_APP_PROBES.map((probe) => {
-    const path = join(appsDir, probe.id, probe.name);
+  const files: SpotifyAppFileInfo[] = SPOTIFY_SPA_FILES.map((probe) => {
+    const path = join(appsDir, probe.file);
     const info = fileInfo(path);
     let exists = info !== null;
     if (!exists) {
@@ -786,38 +807,137 @@ export function captureSpotifyAppFiles(
     }
     return { path, exists, size: info?.size ?? null, mtimeMs: info?.mtimeMs ?? null };
   });
+  const modDirs: SpotifyModDirInfo[] = SPOTIFY_MOD_DIR_IDS.map((id) => {
+    const path = join(appsDir, id);
+    return { path, exists: checkModDirExists(runtime, path, deps) };
+  });
   const ok = files.every((file) => file.exists);
   return {
     ok,
     appsDir,
     files,
+    modDirs,
     ...(ok ? {} : { error: `Missing Spotify app files under ${appsDir}: ${files.filter((file) => !file.exists).map((file) => file.path).join(", ")}` }),
   };
 }
 
+function checkModDirExists(
+  runtime: Runtime,
+  dirPath: string,
+  deps: Pick<SpotifyAppProbeDeps, "dirExists" | "listDir"> & { listDir?: (path: string) => string[] | null },
+): boolean {
+  if (deps.dirExists) {
+    try {
+      const probed = deps.dirExists(dirPath);
+      if (probed !== null) return probed;
+    } catch {
+      // Fall through to the runtime probes.
+    }
+  }
+  const runtimeListDir = (runtime as Runtime & { listDir?: (path: string) => string[] | null }).listDir;
+  const listProbes: Array<(path: string) => string[] | null> = [];
+  if (deps.listDir) listProbes.push(deps.listDir);
+  if (typeof runtimeListDir === "function") listProbes.push(runtimeListDir);
+  listProbes.push(defaultListDir);
+  const appsDir = dirPath.replace(/[\\/][^\\/]+$/, "");
+  for (const listProbe of listProbes) {
+    try {
+      const entries = listProbe(appsDir);
+      if (entries) {
+        const base = dirPath.split(/[\\/]/).filter(Boolean).pop()?.toLowerCase() ?? "";
+        return entries.some((entry) => entry.toLowerCase() === base);
+      }
+    } catch {
+      continue;
+    }
+  }
+  try {
+    if (!runtime.exists(dirPath)) return false;
+    try {
+      if (runtime.isFile(dirPath)) return false;
+    } catch {
+      // isFile unavailable; exists alone is the best signal.
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function spaRangeFor(name: string): { min: number; max: number } | null {
+  const key = name.toLowerCase();
+  if (key.endsWith("xpui.spa")) return SPICETIFY_BACKUP_SIZE_RANGE["xpui.spa"];
+  if (key.endsWith("login.spa")) return SPICETIFY_BACKUP_SIZE_RANGE["login.spa"];
+  return null;
+}
+
+function expectedSizeFor(path: string, expected?: ExpectedBackupSizes): number | null | undefined {
+  if (!expected) return undefined;
+  const lower = path.toLowerCase();
+  if (lower.endsWith("xpui.spa")) return expected.xpuiSize ?? undefined;
+  if (lower.endsWith("login.spa")) return expected.loginSize ?? undefined;
+  return undefined;
+}
+
 /**
- * A restore completed only if the app files still exist and at least one
- * changed (size or mtime). Identical files mean the restore could not be
- * evidenced, so the caller must not delete Spicetify data.
+ * A restore completed only when the stock state holds: xpui.spa and login.spa
+ * exist at plausible sizes (within SPICETIFY_BACKUP_SIZE_RANGE, and matching
+ * the validated backup when expected sizes are supplied) and the extracted
+ * mod dirs (Apps\xpui, Apps\login) no longer exist. An already-stock rerun
+ * with no file change is still ok (idempotent): only a non-stock `after`
+ * state fails.
  */
 export function verifySpotifyRestoreApplied(
   before: SpotifyAppSnapshot,
   after: SpotifyAppSnapshot,
+  expected?: ExpectedBackupSizes,
 ): { ok: boolean; changed: string[]; error?: string } {
-  if (!after.ok) {
+  if (!after.appsDir || !after.files.length) {
     return { ok: false, changed: [], error: after.error ?? "Spotify app files are missing after restore." };
   }
-  const changed = after.files.filter((file) => {
-    const prior = before.files.find((candidate) => candidate.path.toLowerCase() === file.path.toLowerCase());
-    if (!prior || !prior.exists) return true;
-    return prior.size !== file.size || prior.mtimeMs !== file.mtimeMs;
-  }).map((file) => file.path);
-  if (!changed.length) {
+  for (const file of after.files) {
+    if (!file.exists) {
+      return { ok: false, changed: [], error: after.error ?? `Spotify app file is missing after restore: ${file.path}.` };
+    }
+    if (file.size !== null) {
+      const range = spaRangeFor(file.path);
+      if (range && (file.size < range.min || file.size > range.max)) {
+        return {
+          ok: false,
+          changed: [],
+          error: `Restored ${file.path} is ${file.size} bytes (expected ${range.min}-${range.max}); restore cannot be verified.`,
+        };
+      }
+      const wanted = expectedSizeFor(file.path, expected);
+      if (wanted !== undefined && wanted !== null && file.size !== wanted) {
+        return {
+          ok: false,
+          changed: [],
+          error: `Restored ${file.path} is ${file.size} bytes but the validated backup is ${wanted} bytes; restore cannot be verified.`,
+        };
+      }
+    }
+  }
+  const lingering = (after.modDirs ?? []).filter((dir) => dir.exists);
+  if (lingering.length) {
     return {
       ok: false,
       changed: [],
-      error: "spicetify restore completed but no Spotify app file changed; restore cannot be verified.",
+      error: `Extracted Spotify app directories still present after restore: ${lingering.map((dir) => dir.path).join(", ")}.`,
     };
+  }
+  const changed: string[] = [];
+  for (const file of after.files) {
+    const prior = before.files.find((candidate) => candidate.path.toLowerCase() === file.path.toLowerCase());
+    if (!prior || !prior.exists) {
+      changed.push(file.path);
+    } else if (prior.size !== file.size || prior.mtimeMs !== file.mtimeMs) {
+      changed.push(file.path);
+    }
+  }
+  for (const dir of after.modDirs ?? []) {
+    const prior = (before.modDirs ?? []).find((candidate) => candidate.path.toLowerCase() === dir.path.toLowerCase());
+    if (prior?.exists && !dir.exists) changed.push(dir.path);
   }
   return { ok: true, changed };
 }
@@ -831,8 +951,10 @@ export interface SpotifyRestoreOptions extends BackupProbeDeps, SpotifyAppProbeD
 /**
  * Restore Spotify from the verified Spicetify backup. This is the B09
  * integration point: it refuses to run `spicetify restore` unless the backup
- * payload is trustworthy, snapshots the app bundles before the command, and
- * verifies that the app files changed afterwards.
+ * payload is trustworthy, snapshots the stock bundles before the command, and
+ * verifies the stock restored state afterwards (xpui.spa/login.spa present at
+ * the validated backup sizes within SPICETIFY_BACKUP_SIZE_RANGE and the
+ * extracted mod dirs gone). An already-stock rerun stays verified.
  */
 export async function restoreSpotifyFromBackup(
   runtime: Runtime,
@@ -882,8 +1004,12 @@ export async function restoreSpotifyFromBackup(
       error: `E_RESTORE_FAILED: spicetify restore ${result.timedOut ? "timed out" : `exited with code ${result.code}`}${result.error ? `: ${sanitizeDetail(result.error)}` : "."}`,
     };
   }
-  const after = captureSpotifyAppFiles(runtime, spicetify, options);
-  const verified = verifySpotifyRestoreApplied(before, after);
+  const rawAfter = captureSpotifyAppFiles(runtime, spicetify, options);
+  const backupXpui = backup.files.find((file) => file.name === "xpui.spa");
+  const backupLogin = backup.files.find((file) => file.name === "login.spa");
+  const expected: ExpectedBackupSizes = { xpuiSize: backupXpui?.size ?? null, loginSize: backupLogin?.size ?? null };
+  const after = withBackupSizes(rawAfter, expected, resolveRestoreFileSize(runtime, options));
+  const verified = verifySpotifyRestoreApplied(before, after, expected);
   if (!verified.ok) {
     return {
       code: 1,
@@ -892,10 +1018,54 @@ export async function restoreSpotifyFromBackup(
       error: `E_RESTORE_UNVERIFIED: ${verified.error ?? "Spotify app files did not change"}. Nothing Spicetify-owned may be deleted.`,
     };
   }
+  const sizeNote = verified.changed.length
+    ? `${verified.changed.length} app file(s) changed`
+    : "already-stock install verified";
   return {
     code: 0,
-    stdout: `Spotify restored from ${backup.backupDir ?? "the Spicetify backup"}; ${verified.changed.length} app file(s) changed.`,
+    stdout: `Spotify restored from ${backup.backupDir ?? "the Spicetify backup"}; ${sizeNote}.`,
     stderr: result.stderr ?? "",
+  };
+}
+
+function resolveRestoreFileSize(
+  runtime: Runtime,
+  options: SpotifyRestoreOptions,
+): (path: string) => number | null {
+  try {
+    if (options.fileSize) return options.fileSize;
+    const probed = (runtime as Runtime & { fileSize?: (path: string) => number | null }).fileSize;
+    if (typeof probed === "function") return probed;
+  } catch {
+    // Fall through to statSync.
+  }
+  return defaultBackupFileSize;
+}
+
+function withBackupSizes(
+  after: SpotifyAppSnapshot,
+  expected: ExpectedBackupSizes,
+  fileSize: (path: string) => number | null,
+): SpotifyAppSnapshot {
+  if (!after.files.length) return after;
+  let touched = false;
+  const files = after.files.map((file) => {
+    if (file.size !== null) return file;
+    let probed: number | null = null;
+    try {
+      probed = fileSize(file.path);
+    } catch {
+      probed = null;
+    }
+    if (probed === null) return file;
+    touched = true;
+    return { ...file, size: probed };
+  });
+  if (!touched) return after;
+  return {
+    ...after,
+    files,
+    ok: files.every((file) => file.exists),
   };
 }
 
