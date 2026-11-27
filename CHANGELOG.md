@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.6.0 — 2026-11-27
+
+First stable release (`latest` dist-tag). Install with `npx opencode-spotify setup`.
+
+### Added
+
+- Global installer CLI (`setup`, `status`, `update`, `repair`, `doctor`,
+  `uninstall`) with read-only detection, numbered-plan approval, `--dry-run`,
+  official Spicetify lifecycle, bridge synchronization, and self-verification.
+- Simplified Ink TUI: inline dashboard on interactive TTYs with deterministic
+  plain fallback (`--plain` / `--no-ink`, non-TTY, `CI`, `TERM=dumb`,
+  `OPENCODE_SPOTIFY_UI=plain`); 4-option maintenance menu (Update to latest,
+  Repair installation, Uninstall, Exit); `opencode service restart` guidance.
+- Official Spicetify-only onboarding: every install and update — no copy,
+  Winget/Scoop/Chocolatey copy, or unknown owner — migrates through the pinned,
+  hash-verified official installer (manager package removed first, official
+  `%LOCALAPPDATA%\spicetify` first on PATH). No second copy, no mixed package
+  managers.
+- Spicetify Marketplace custom app installed by default (`--no-marketplace` to
+  opt out): official release-zip download with bounded GitHub CDN redirect
+  following, path-traversal guards, PowerShell extraction (no
+  `Invoke-Expression`), and registration via `spicetify config custom_apps
+  marketplace` only — zero user theme, color, or asset edits.
+- Stock-state Spotify restore verification (`xpui.spa` / `login.spa` sizes vs
+  the validated backup, extracted mod dirs gone, idempotent reruns) gating
+  complete uninstall, which wipes credentials, Spicetify config/Marketplace,
+  and the Winget-owned package after a verified restore.
+- Duplicate registration handling: `plugin list` duplicates are surfaced by
+  `doctor`, and install/update remove every stale `opencode-spotify@*` spec
+  before ensuring the target; a configured-but-unreloaded registration reports
+  `opencode service restart` instead of a generic failure.
+- Per-user installer lock, cooperative Ctrl+C, per-installation 256-bit secret
+  with mutual-HMAC loopback auth, sanitized diagnostics, and non-destructive
+  dry-runs throughout.
+- Automated tag-triggered OIDC `--provenance` publishing: pushing `vX.Y.Z`
+  (stable, `latest`) or `vX.Y.Z-beta.N` (prerelease, `beta`) runs the full CI
+  gates, publishes the exact verified tarball, and attaches it to the GitHub
+  Release. First publish skipped `latest`; it now points here.
+- V0.5.7 player baseline retained: monochrome sidebar player, Now Playing
+  panel, queue/library/playlists/Liked Songs/search, Spotify-first lyrics with
+  opt-in LRCLIB, mouse-first controls, and TUI regression coverage (Bun FFI +
+  VT emission suites).
+
 ## Unreleased
 
 - Tag-triggered npm release: pushing `vX.Y.Z` (stable, `latest`) or

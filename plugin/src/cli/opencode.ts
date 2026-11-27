@@ -317,6 +317,61 @@ export function guardRegistrationReplacement(
   return { allowed: true }
 }
 
+/** Version component of an `id@x.y.z` spec; null when the row is local, bare, or unversioned. */
+function specVersionOf(spec: string | null | undefined): string | null {
+  if (!spec) return null
+  const value = spec.trim()
+  const at = value.lastIndexOf("@")
+  if (at <= 0) return null
+  const candidate = value.slice(at + 1).trim()
+  return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(candidate) ? candidate : null
+}
+
+/**
+ * Registry specs (`opencode-spotify@x.y.z`) observed in `plugin list` that do
+ * not equal the target spec. When duplicate registrations exist, `plugin list`
+ * keeps reporting the stale row and a re-add of the target is a no-op
+ * ("already configured"), so callers remove every stale spec before/while
+ * ensuring the target. Local/path/bare rows without a versioned spec are
+ * never auto-removed.
+ */
+export function stalePluginSpecs(entries: PluginListEntry[], targetSpec: string): string[] {
+  const target = (targetSpec ?? "").trim()
+  if (!target) return []
+  const seen = new Set<string>()
+  const stale: string[] = []
+  for (const entry of entries ?? []) {
+    if (!entry || !isPluginId(entry.id)) continue
+    const spec = deriveSpec(entry.id, entry.version, entry.source ?? "")
+    if (!spec || specVersionOf(spec) === null) continue
+    if (spec === target || seen.has(spec)) continue
+    seen.add(spec)
+    stale.push(spec)
+  }
+  return stale
+}
+
+/**
+ * The configured spec already equals the expected version but `plugin list`
+ * still reports an older resolved version: the OpenCode service has not
+ * reloaded the registration (restart required), not a missing registration.
+ * Version comparison only — never used to authorize a replacement.
+ */
+export function registrationReloadNeeded(
+  plugin: Pick<OpenCodePluginInspection, "registered" | "local" | "version" | "spec">,
+  expected: string,
+): boolean {
+  if (!plugin || !plugin.registered || plugin.local) return false
+  const want = (expected ?? "").trim()
+  if (!want) return false
+  const spec = (plugin.spec ?? "").trim()
+  if (!spec) return false
+  const specVer = specVersionOf(spec)
+  if (!specVer || compareVersions(specVer, want) !== 0) return false
+  const listed = (plugin.version ?? "").trim()
+  return !!listed && compareVersions(listed, want) === -1
+}
+
 /**
  * Neutral working directory for global plugin queries. `opencode plugin list`
  * resolves project plugins from the cwd, so listing from the caller's project

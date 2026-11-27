@@ -2182,7 +2182,7 @@ async function runComplete(
     if (notice) notes.push(notice)
   }
   if (remainingComponents({ mode: "complete", components: visible }).length) {
-    notes.push("Rerun `opencode-spotify uninstall` to retry the remaining items. If the plugin/bridge is still needed, run `opencode-spotify repair`.")
+    notes.push("Rerun `npx opencode-spotify uninstall` to retry the remaining items. If the plugin/bridge is still needed, run `npx opencode-spotify repair`.")
   }
   for (const check of diagnosticScope.manualChecks) notes.push(check)
 

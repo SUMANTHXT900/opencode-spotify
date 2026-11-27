@@ -44,7 +44,7 @@ Run `setup` — it performs the global registration itself as one of its plan
 steps, so a single command installs:
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 setup
+npx opencode-spotify setup
 ```
 
 Pin the exact version so the plugin and the installed bridge stay coordinated. Never
@@ -57,7 +57,7 @@ To verify a release tarball byte-for-byte, install it by local path into an
 isolated prefix, then register the absolute installed path:
 
 ```powershell
-cmd /d /s /c "call npm install --global --prefix `"<isolated-prefix>`" `"<path>\opencode-spotify-0.6.0-beta.3.tgz`""
+cmd /d /s /c "call npm install --global --prefix `"<isolated-prefix>`" `"<path>\opencode-spotify-0.6.0.tgz`""
 cmd /d /s /c "call opencode plugin add `"<isolated-prefix>\node_modules\opencode-spotify`""
 ```
 
@@ -71,8 +71,8 @@ real step descriptions, asks approval, then executes with backups first and veri
 afterwards. `--dry-run` shows the plan and changes nothing. From the registry:
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 setup --dry-run
-npx opencode-spotify@0.6.0-beta.3 setup
+npx opencode-spotify setup --dry-run
+npx opencode-spotify setup
 ```
 
 From a local-tarball install, run the installed tarball's CLI directly (same commands,
@@ -129,9 +129,11 @@ never mixed and no second copy is installed:
 | Official script (`%LOCALAPPDATA%\spicetify`) | Pinned official installer | Validated local directory plus exact PATH entries |
 | winget | Migrated to the official installer | `winget uninstall --id Spicetify.Spicetify -e --accept-source-agreements --disable-interactivity` |
 | scoop / Chocolatey | Migrated to the official installer | That manager (`spicetify-cli`) |
-| Unknown | Refused with manual guidance | Disclosed, never deleted |
+| Unknown | Migrated to the official installer (ownership disclosed, never deleted) | Disclosed, never deleted |
 
-Fresh installs refuse to overlay any existing copy. The Marketplace region is
+A fresh install never overlays another owner's copy: legacy Winget, Scoop, and
+Chocolatey copies are migrated through the pinned official installer (their
+manager package is removed first). The Marketplace region is
 removed from the official script by a reviewed patch (no Marketplace prompt,
 URL, or download there — see [MAINTAINERS.md](MAINTAINERS.md)); the adapter
 then installs the Marketplace deterministically by default (`--no-marketplace`
@@ -207,7 +209,7 @@ to clear a `Duplicate plugin ID` state.
 The installer distinguishes two labels when checking for updates:
 
 - **stable** — ordinary releases, safe for everyone.
-- **beta** — prereleases such as `0.6.0-beta.3`, for testers.
+- **beta** — prereleases such as `0.6.0-beta.4`, for testers.
 
 Releases publish by tag: `vX.Y.Z` ships to the `latest` dist-tag, `vX.Y.Z-beta.N`
 to the `beta` dist-tag, each with its own CI verification and GitHub Release.
@@ -221,10 +223,10 @@ is compatible. The updater never replaces a local development registration on it
 Both are read-only and safe to run any time, including with `--offline`:
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 status
-npx opencode-spotify@0.6.0-beta.3 status --json
-npx opencode-spotify@0.6.0-beta.3 doctor
-npx opencode-spotify@0.6.0-beta.3 doctor --json
+npx opencode-spotify status
+npx opencode-spotify status --json
+npx opencode-spotify doctor
+npx opencode-spotify doctor --json
 ```
 
 `--json` emits exactly one valid JSON document with no UI text. `--json` is rejected
@@ -234,8 +236,8 @@ JSON document.
 ## Repair
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 repair --dry-run
-npx opencode-spotify@0.6.0-beta.3 repair
+npx opencode-spotify repair --dry-run
+npx opencode-spotify repair
 ```
 
 Repair fixes missing or damaged owned files and registration and reuses the existing
@@ -247,8 +249,8 @@ afterwards.
 ## Uninstall
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 uninstall --dry-run
-npx opencode-spotify@0.6.0-beta.3 uninstall
+npx opencode-spotify uninstall --dry-run
+npx opencode-spotify uninstall
 ```
 
 - **Plugin-only (default):** removes the global registration and the owned bridge.

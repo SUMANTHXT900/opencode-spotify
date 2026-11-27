@@ -304,10 +304,26 @@ function detectionRows(detection: Detection): Array<{ tone: InkTone; text: strin
     ? `Spicetify ${detection.spicetify.version ?? "version unknown"}`
     : "Spicetify not installed"
   add(detection.spotify.installed && detection.spicetify.available, `${spotifyLabel} + ${spicetifyLabel}`)
-  add(
-    detection.bridge.installed && detection.bridge.credentialValid && !detection.port.busy,
-    `Bridge ${detection.bridge.registration}${detection.bridge.credentialValid ? "" : " | credential missing"} | ${detection.port.busy ? "port busy" : "port free"}`,
-  )
+  const bridgeReady = detection.bridge.installed && detection.bridge.credentialValid;
+  // A port held by our own bridge is healthy operation, not a conflict.
+  const ownedBusy = detection.port.busy && detection.port.likelyOwnedByThisPlugin === true;
+  const credentialSuffix = detection.bridge.credentialValid ? "" : " | credential missing";
+  if (!detection.port.busy) {
+    add(
+      bridgeReady,
+      `Bridge ${detection.bridge.registration}${credentialSuffix} | port free`,
+    );
+  } else if (ownedBusy) {
+    add(
+      bridgeReady,
+      `Bridge ${detection.bridge.registration}${credentialSuffix} (active)`,
+    );
+  } else {
+    add(
+      false,
+      `Bridge ${detection.bridge.registration}${credentialSuffix} | port conflict`,
+    );
+  }
   return rows
 }
 

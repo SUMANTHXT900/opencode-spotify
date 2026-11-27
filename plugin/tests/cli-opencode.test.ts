@@ -12,7 +12,9 @@ import {
   parsePluginList,
   projectPlugins,
   reconcileRegistration,
+  registrationReloadNeeded,
   removeGlobalPlugin,
+  stalePluginSpecs,
   updateGlobalPlugin,
 } from "../src/cli/opencode.ts"
 import { createCancelToken } from "../src/cli/cancel.ts"
@@ -559,4 +561,84 @@ test("reconcileRegistration stops at a cancellation boundary", async () => {
   assert.equal(reconciled.state, "unknown")
   assert.equal(reconciled.outcome, "failed")
   assert.equal(reconciled.detail, "Cancelled")
+})
+
+test("inspectOpenCode exposes duplicates when the same plugin is configured twice", async () => {
+  const temp = "C:\\Temp"
+  const runtime = createFakeRuntime({
+    which: withBin,
+    env: { TEMP: temp },
+    exists: (path) => path === temp,
+    onRun: stubRun({
+      "opencode --version": ok("opencode 2.4.2\n"),
+      "opencode debug paths config": ok(`${temp}\\config.json\n`),
+      "opencode plugin list": ok(
+        "ID                VERSION       SOURCE\nopencode-spotify  0.6.0-beta.3  opencode-spotify@0.6.0-beta.3\nopencode-spotify  0.6.0-beta.4  opencode-spotify@0.6.0-beta.4\n",
+      ),
+      "opencode plugin --help": ok("Commands:\n  add <spec>     add a plugin\n  remove <spec>  remove a plugin\n  list           list plugins\n"),
+    }),
+  })
+  const info = await inspectOpenCode(runtime)
+  assert.equal(info.plugin.registered, true)
+  assert.equal(info.plugin.version, "0.6.0-beta.3")
+  assert.equal(info.plugin.duplicates.length, 1)
+  assert.equal(info.plugin.duplicates[0]?.version, "0.6.0-beta.4")
+  assert.deepEqual(stalePluginSpecs(
+    [{ id: "opencode-spotify", version: "0.6.0-beta.3", source: "opencode-spotify@0.6.0-beta.3" },
+      { id: "opencode-spotify", version: "0.6.0-beta.4", source: "opencode-spotify@0.6.0-beta.4" }],
+    "opencode-spotify@0.6.0-beta.4",
+  ), ["opencode-spotify@0.6.0-beta.3"])
+})
+
+test("inspectOpenCode surfaces a resolved version that lags the configured spec", async () => {
+  const temp = "C:\\Temp"
+  const runtime = createFakeRuntime({
+    which: withBin,
+    env: { TEMP: temp },
+    exists: (path) => path === temp,
+    onRun: stubRun({
+      "opencode --version": ok("opencode 2.4.2\n"),
+      "opencode debug paths config": ok(`${temp}\\config.json\n`),
+      "opencode plugin list": ok(
+        "ID                VERSION       SOURCE\nopencode-spotify  0.6.0-beta.3  opencode-spotify@0.6.0-beta.4\n",
+      ),
+      "opencode plugin --help": ok("Commands:\n  add <spec>     add a plugin\n  remove <spec>  remove a plugin\n  list           list plugins\n"),
+    }),
+  })
+  const info = await inspectOpenCode(runtime)
+  assert.equal(info.plugin.registered, true)
+  assert.equal(info.plugin.version, "0.6.0-beta.3")
+  assert.equal(info.plugin.spec, "opencode-spotify@0.6.0-beta.4")
+  assert.equal(registrationReloadNeeded(info.plugin, "0.6.0-beta.4"), true)
+})
+
+test("stalePluginSpecs ignores local, path and bare rows", () => {
+  assert.deepEqual(stalePluginSpecs(
+    [{ id: "opencode-spotify", version: "local", source: "C:\\dev\\opencode-spotify" }],
+    "opencode-spotify@0.6.0-beta.4",
+  ), [])
+  assert.deepEqual(stalePluginSpecs(
+    [{ id: "opencode-spotify", version: "0.6.0-beta.3", source: "" }],
+    "opencode-spotify@0.6.0-beta.4",
+  ), ["opencode-spotify@0.6.0-beta.3"])
+  assert.deepEqual(stalePluginSpecs(
+    [{ id: "other-plugin", version: "1.0.0", source: "other-plugin@1.0.0" }],
+    "opencode-spotify@0.6.0-beta.4",
+  ), [])
+  assert.deepEqual(stalePluginSpecs([], "opencode-spotify@0.6.0-beta.4"), [])
+  assert.deepEqual(stalePluginSpecs(
+    [{ id: "opencode-spotify", version: "0.6.0-beta.4", source: "opencode-spotify@0.6.0-beta.4" }],
+    "opencode-spotify@0.6.0-beta.4",
+  ), [])
+})
+
+test("registrationReloadNeeded only fires on a spec match with a lagging version", () => {
+  const base = { registered: true, local: false, version: "0.6.0-beta.4", spec: "opencode-spotify@0.6.0-beta.4" }
+  assert.equal(registrationReloadNeeded(base, "0.6.0-beta.4"), false)
+  assert.equal(registrationReloadNeeded({ ...base, version: "0.6.0-beta.3" }, "0.6.0-beta.4"), true)
+  assert.equal(registrationReloadNeeded({ ...base, local: true }, "0.6.0-beta.4"), false)
+  assert.equal(registrationReloadNeeded({ ...base, registered: false }, "0.6.0-beta.4"), false)
+  assert.equal(registrationReloadNeeded({ ...base, spec: "opencode-spotify@0.6.0-beta.3" }, "0.6.0-beta.4"), false)
+  assert.equal(registrationReloadNeeded({ ...base, spec: null }, "0.6.0-beta.4"), false)
+  assert.equal(registrationReloadNeeded(base, ""), false)
 })

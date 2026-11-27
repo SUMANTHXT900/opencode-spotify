@@ -1151,3 +1151,76 @@ test("official-only routing never uses winget/scoop/choco and unknown migrates",
   assert.equal(gate.status, "outdated")
   assert.equal(gate.target, "2.47.0")
 })
+
+test("duplicate global registrations are all removed before the target is re-added", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.6.0-beta.3"
+  let configured = ["opencode-spotify@0.6.0-beta.3", "opencode-spotify@0.6.0-beta.4"]
+  const realRun = runtime.run.bind(runtime)
+  runtime.run = (async (file: string, args: string[], options?: unknown) => {
+    if (file.includes("opencode") && args.join(" ") === "plugin list") {
+      runtime.calls.push({ file, args })
+      const rows = configured.map((spec) => `opencode-spotify  ${spec.slice(spec.lastIndexOf("@") + 1)}  ${spec}`)
+      return { code: 0, stdout: `ID  VERSION  SOURCE\n${rows.join("\n")}\n`, stderr: "" }
+    }
+    if (file.includes("opencode") && args[0] === "plugin" && args[1] === "remove") {
+      runtime.calls.push({ file, args })
+      configured = configured.filter((spec) => spec !== args[2])
+      if (runtime.state.opencode.listVersion && args[2]?.includes(runtime.state.opencode.listVersion)) {
+        runtime.state.opencode.listVersion = null
+      }
+      return { code: 0, stdout: "removed", stderr: "" }
+    }
+    if (file.includes("opencode") && args[0] === "plugin" && args[1] === "add") {
+      runtime.calls.push({ file, args })
+      const spec = args[2] ?? ""
+      if (!configured.includes(spec)) configured.push(spec)
+      const match = spec.match(/@(\d+\.\d+\.\d+)/)
+      runtime.state.opencode.listVersion = match?.[1] ?? runtime.state.opencode.listVersion
+      return { code: 0, stdout: `Plugin "${spec}" is already configured`, stderr: "" }
+    }
+    return realRun(file, args, options as never)
+  }) as typeof runtime.run
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, scriptedPrompt(), {
+    command: "update", yes: true, nonInteractive: true, marketplace: false,
+  })
+  ctx.detection = fakeDetection(runtime)
+  ctx.versions.plugin.latest = "0.6.0-beta.4"
+  assert.equal(await runUpdate(ctx, "plugin"), 0, ui.lines.join("\n"))
+  const cmds = commands(runtime)
+  assert.ok(cmds.some((c) => c.includes("plugin remove opencode-spotify@0.6.0-beta.3")), "stale spec removed")
+  assert.ok(!cmds.some((c) => c.includes("plugin remove opencode-spotify@0.6.0-beta.4")), "target spec never removed")
+  assert.ok(cmds.some((c) => c.includes("plugin add opencode-spotify@0.6.0-beta.4")), "target re-added")
+  assert.deepEqual(configured, ["opencode-spotify@0.6.0-beta.4"])
+})
+
+test("a resolved version that lags the configured spec reports restart instead of a generic failure", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.6.0-beta.3"
+  const realRun = runtime.run.bind(runtime)
+  runtime.run = (async (file: string, args: string[], options?: unknown) => {
+    if (file.includes("opencode") && args.join(" ") === "plugin list") {
+      runtime.calls.push({ file, args })
+      return { code: 0, stdout: "ID  VERSION  SOURCE\nopencode-spotify  0.6.0-beta.3  opencode-spotify@0.6.0-beta.4\n", stderr: "" }
+    }
+    if (file.includes("opencode") && args[0] === "plugin" && args[1] === "remove") {
+      runtime.calls.push({ file, args })
+      return { code: 0, stdout: "removed", stderr: "" }
+    }
+    if (file.includes("opencode") && args[0] === "plugin" && args[1] === "add") {
+      runtime.calls.push({ file, args })
+      return { code: 0, stdout: `Plugin "opencode-spotify@0.6.0-beta.4" is already configured in C:\\Users\\Test\\.config\\opencode\\opencode.json`, stderr: "" }
+    }
+    return realRun(file, args, options as never)
+  }) as typeof runtime.run
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, scriptedPrompt(), {
+    command: "update", yes: true, nonInteractive: true, marketplace: false,
+  })
+  ctx.detection = fakeDetection(runtime)
+  ctx.versions.plugin.latest = "0.6.0-beta.4"
+  assert.equal(await runUpdate(ctx, "plugin"), 1, ui.lines.join("\n"))
+  assert.match(ui.lines.join("\n"), /restart running OpenCode processes/i)
+  assert.match(ui.lines.join("\n"), /opencode service restart/i)
+})

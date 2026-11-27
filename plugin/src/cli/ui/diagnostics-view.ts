@@ -96,8 +96,8 @@ export function troubleshootingSteps(id: string): string[] {
       return ["Upgrade OpenCode; the installer relies on native `opencode plugin add/remove`."]
     case "registration":
       return [
-        "Run `opencode-spotify repair` to reconcile the owned global registration.",
-        "If inspection still fails, rerun `opencode-spotify doctor`; do not delete OpenCode configuration manually.",
+        "Run `npx opencode-spotify repair` to reconcile the owned global registration.",
+        "If inspection still fails, rerun `npx opencode-spotify doctor`; do not delete OpenCode configuration manually.",
       ]
     case "project-conflict":
       return ["Keep or remove the project-local plugin entry yourself; the installer never edits project configuration."]
@@ -107,34 +107,34 @@ export function troubleshootingSteps(id: string): string[] {
         "Remove the project entry yourself when you want the global package; the installer never edits project configuration.",
       ]
     case "dependencies":
-      return ["Reinstall with the official installer, then rerun `opencode-spotify doctor`; do not hand-copy node_modules."]
+      return ["Reinstall with the official installer, then rerun `npx opencode-spotify doctor`; do not hand-copy node_modules."]
     case "spotify":
-      return ["Install Spotify Desktop from Spotify, then rerun `opencode-spotify setup`."]
+      return ["Install Spotify Desktop from Spotify, then rerun `npx opencode-spotify setup`."]
     case "spotify-store":
-      return ["Restart Spotify, then rerun `opencode-spotify repair` if the bridge stops after a Store update."]
+      return ["Restart Spotify, then rerun `npx opencode-spotify repair` if the bridge stops after a Store update."]
     case "spicetify":
-      return ["Run `opencode-spotify setup` and choose automatic or manual Spicetify installation."]
+      return ["Run `npx opencode-spotify setup` and choose automatic or manual Spicetify installation."]
     case "spicetify-version":
       return ["Upgrade Spicetify with the owner-specific method shown above; do not mix package managers."]
     case "spicetify-config":
-      return ["Run `spicetify -c` and confirm Spotify/Spicetify are configured; then rerun `opencode-spotify repair`."]
+      return ["Run `spicetify -c` and confirm Spotify/Spicetify are configured; then rerun `npx opencode-spotify repair`."]
     case "bridge-registration":
-      return ["Run `opencode-spotify repair` to register the bridge extension."]
+      return ["Run `npx opencode-spotify repair` to register the bridge extension."]
     case "bridge-credentials":
-      return ["Run `opencode-spotify repair`; do not delete the credential file unless you accept re-pairing."]
+      return ["Run `npx opencode-spotify repair`; do not delete the credential file unless you accept re-pairing."]
     case "bridge":
-      return ["Run `opencode-spotify repair` to synchronize the extension and its registration."]
+      return ["Run `npx opencode-spotify repair` to synchronize the extension and its registration."]
     case "port":
       return [
         `Identify the listener with \`Get-NetTCPConnection -LocalPort ${BRIDGE_PORT}\`.`,
         "Close the conflicting application or leave that port alone; the installer never terminates an unknown process.",
       ]
     case "compatibility":
-      return ["Run `opencode-spotify update --dry-run` to review compatible updates, then `opencode-spotify update`."]
+      return ["Run `npx opencode-spotify update --dry-run` to review compatible updates, then `npx opencode-spotify update`."]
     case "connection":
       return []
     default:
-      return ["Rerun `opencode-spotify doctor --verbose`. If the problem persists, attach a sanitized report."]
+      return ["Rerun `npx opencode-spotify doctor --verbose`. If the problem persists, attach a sanitized report."]
   }
 }
 
@@ -246,7 +246,7 @@ export function renderDiagnosticsViewPlain(
   lines.push("")
   lines.push(paint(color, "bold", "Summary"))
   lines.push(`  ${ok} ok, ${warn} warning(s), ${fail} failure(s)${info ? `, ${info} info` : ""}`)
-  lines.push("  No changes were made. Use `opencode-spotify repair` or `setup` for fixes.")
+  lines.push("  No changes were made. Use `npx opencode-spotify repair` or `npx opencode-spotify setup` for fixes.")
   for (const note of view.notes) {
     pushWrapped(lines, "   - ", note, width)
   }

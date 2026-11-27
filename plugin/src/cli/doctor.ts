@@ -284,13 +284,22 @@ export async function doctorChecks(ctx: OperationContext): Promise<DoctorCheck[]
       d.opencode.plugin.local
         ? `A local development plugin is registered (${d.opencode.plugin.source ?? "path unknown"}).`
         : `Global plugin registered${d.opencode.plugin.version ? ` at ${d.opencode.plugin.version}` : ""}.`,
-      d.opencode.plugin.local ? "Run `opencode-spotify setup` (official installer) to register the global package; project config is never edited." : undefined)
+      d.opencode.plugin.local ? "Run `npx opencode-spotify setup` (official installer) to register the global package; project config is never edited." : undefined)
   } else if (d.opencode.plugin.state === "unknown") {
     add("registration", "warn", "Global plugin inspection failed (timeout or command error); state is unknown, not proven absent.",
-      `Rerun \`opencode-spotify doctor\`. Detail: ${redactSensitive(d.opencode.plugin.detail ?? "plugin list did not complete")}`)
+      `Rerun \`npx opencode-spotify doctor\`. Detail: ${redactSensitive(d.opencode.plugin.detail ?? "plugin list did not complete")}`)
   } else {
     add("registration", "warn", "OpenCode Spotify is not registered globally.",
-      "Run `opencode-spotify setup` (official installer) and approve the global registration.")
+      "Run `npx opencode-spotify setup` (official installer) and approve the global registration.")
+  }
+  const dupeRows = d.opencode.plugin.duplicates ?? []
+  if (d.opencode.plugin.registered && dupeRows.length > 0) {
+    const rows = dupeRows
+      .map((entry) => entry.source?.trim() ? `${entry.id} ${entry.version} (${entry.source})` : `${entry.id} ${entry.version}`)
+      .join("; ")
+    add("registration-duplicates", "warn",
+      `Multiple opencode-spotify registrations are configured (${rows}); the first match wins and updates may verify against the wrong one.`,
+      "Remove every stale spec with `opencode plugin remove <spec>`, restart OpenCode, then run `npx opencode-spotify update`.")
   }
   let project = [] as Awaited<ReturnType<typeof projectPlugins>>
   try { project = await projectPlugins(ctx.runtime) } catch { project = [] }
@@ -315,38 +324,38 @@ export async function doctorChecks(ctx: OperationContext): Promise<DoctorCheck[]
 
   add("spicetify", d.spicetify.available ? "ok" : "warn",
     d.spicetify.available ? `Spicetify ${d.spicetify.version ?? "version unknown"} at ${d.spicetify.path}` : "Spicetify not installed",
-    d.spicetify.available ? undefined : "Run `opencode-spotify setup` (official installer) and follow the Spicetify installation step, or install it from spicetify.app and re-run setup.")
+    d.spicetify.available ? undefined : "Run `npx opencode-spotify setup` (official installer) and follow the Spicetify installation step, or install it from spicetify.app and re-run setup.")
   if (d.spicetify.available) {
     add("spicetify-version", isAtLeast(d.spicetify.version, MIN_SPICETIFY) === false ? "warn" : "ok",
       `Spicetify ${d.spicetify.version ?? "version unknown"}; minimum ${MIN_SPICETIFY}`,
-      isAtLeast(d.spicetify.version, MIN_SPICETIFY) === false ? "Run `opencode-spotify update` (official installer)." : undefined)
+      isAtLeast(d.spicetify.version, MIN_SPICETIFY) === false ? "Run `npx opencode-spotify update` (official installer)." : undefined)
     // Legacy manager copies are never updated by hand-mixing package managers:
     // the official installer is the single supported route forward.
     if (d.spicetify.owner === "winget" || d.spicetify.owner === "scoop" || d.spicetify.owner === "choco") {
       add("spicetify-manager", "info",
         `Spicetify sits on a legacy manager path (${ownershipLabel(d.spicetify.owner)} at ${d.spicetify.path ?? "unknown path"}).`,
-        "Run `opencode-spotify update` (official installer) to migrate to the latest official release.")
+        "Run `npx opencode-spotify update` (official installer) to migrate to the latest official release.")
     }
     add("spicetify-config", d.spicetify.configPath ? "ok" : "warn",
       d.spicetify.configPath ? `Config: ${d.spicetify.configPath}` : "Spicetify configuration not located",
       d.spicetify.configPath ? undefined : "Run `spicetify -c` and confirm Spotify/Spicetify are configured.")
     add("bridge-registration", d.spicetify.bridgeRegistered ? "ok" : "warn",
       d.spicetify.bridgeRegistered ? "Bridge extension is listed in Spicetify configuration." : "Bridge extension is not registered.",
-      d.spicetify.bridgeRegistered ? undefined : "Run `opencode-spotify repair` (official installer).")
+      d.spicetify.bridgeRegistered ? undefined : "Run `npx opencode-spotify repair` (official installer).")
   }
 
   if (d.bridge.credentialValid) {
     add("bridge-credentials", "ok", "Credential file has a valid shape; values are not displayed.")
   } else if (d.bridge.configExists) {
     add("bridge-credentials", "fail", "Credential file exists but is invalid or unreadable.",
-      "Run `opencode-spotify repair` (official installer); do not delete the file manually unless you accept losing the pairing.")
+      "Run `npx opencode-spotify repair` (official installer); do not delete the file manually unless you accept losing the pairing.")
   } else {
     add("bridge-credentials", "warn", "Bridge credentials are not provisioned.",
-      "Run `opencode-spotify setup` or `opencode-spotify repair` (official installer).")
+      "Run `npx opencode-spotify setup` or `npx opencode-spotify repair` (official installer).")
   }
   add("bridge", d.compatibility.bridge === "compatible" ? "ok" : d.compatibility.bridge === "missing" ? "warn" : "warn",
     `Bridge: ${compatibilityLabel(d.compatibility.bridge)}`,
-    d.compatibility.bridge === "compatible" ? undefined : "Run `opencode-spotify repair` (official installer) to synchronize the extension with this package.")
+    d.compatibility.bridge === "compatible" ? undefined : "Run `npx opencode-spotify repair` (official installer) to synchronize the extension with this package.")
 
   // Marketplace presence is third-party state, never a failure: this
   // installer deliberately removes the Marketplace step, so it can only ever
@@ -401,7 +410,7 @@ export async function doctorChecks(ctx: OperationContext): Promise<DoctorCheck[]
   const unknownUpdate = updates.plugin.status === "unknown" || updates.spicetify.status === "unknown"
   add("updates", outdated ? "info" : unknownUpdate ? "info" : "ok",
     `Updates: plugin ${updateLabel(updates.plugin)}; Spicetify ${updateLabel(updates.spicetify)}.`,
-    outdated ? "Run `opencode-spotify update` (official installer) when ready; updates are never applied by diagnostics." : undefined)
+    outdated ? "Run `npx opencode-spotify update` (official installer) when ready; updates are never applied by diagnostics." : undefined)
 
   add("compatibility", d.compatibility.opencode === "ok" && d.compatibility.bridge === "compatible" ? "ok" : "warn",
     `OpenCode ${compatibilityLabel(d.compatibility.opencode)}; Spicetify ${compatibilityLabel(d.compatibility.spicetify)}; bridge ${compatibilityLabel(d.compatibility.bridge)}.`)
@@ -437,8 +446,8 @@ export async function runDoctor(ctx: OperationContext): Promise<number> {
   }
   ctx.ui.section("Summary")
   ctx.ui.line(`  ${summary.ok} ok, ${summary.warn} warning(s), ${summary.fail} failure(s)`)
-  ctx.ui.line("  No changes were made. Use `opencode-spotify repair` or `opencode-spotify setup` (official installer) for fixes.")
+  ctx.ui.line("  No changes were made. Use `npx opencode-spotify repair` or `npx opencode-spotify setup` (official installer) for fixes.")
   ctx.ui.line("  Registration is not a live connection; playback is verified only at runtime.")
-  ctx.ui.line("  For a public GitHub issue, run `opencode-spotify doctor --json` and copy the sanitizedReport field.")
+  ctx.ui.line("  For a public GitHub issue, run `npx opencode-spotify doctor --json` and copy the sanitizedReport field.")
   return summary.fail ? 1 : 0
 }

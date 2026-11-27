@@ -19,7 +19,7 @@
 // Cancellation is cooperative: every mutation receives ctx.cancel, protected
 // steps finish once started, and a cancelled run returns 130 (never 1).
 import { compareVersions } from "./compat.ts"
-import { inspectOpenCode, addGlobalPlugin, reconcileRegistration, removeGlobalPlugin, updateGlobalPlugin } from "./opencode.ts"
+import { inspectOpenCode, addGlobalPlugin, reconcileRegistration, removeGlobalPlugin, updateGlobalPlugin, listPlugins, neutralCwd, registrationReloadNeeded, stalePluginSpecs } from "./opencode.ts"
 import { detectEnvironment } from "./detect.ts"
 import { bridgeOperation } from "./bridge.ts"
 import { upgradeSpicetify } from "./spicetify-official.ts"
@@ -153,7 +153,7 @@ export function spicetifyUpdateGate(input: {
     target: null as string | null,
   }
   if (!input.installed) {
-    return { ...base, status: "not-installed", message: "Spicetify is not detected; run `opencode-spotify setup` instead." }
+    return { ...base, status: "not-installed", message: "Spicetify is not detected; run `npx opencode-spotify setup` instead." }
   }
   if (!achievable) {
     const published = (input.latest ?? "").trim()
@@ -237,10 +237,10 @@ export interface UpdateDeps {
 export async function ensureMarketplaceAfterUpgrade(
   ctx: OperationContext,
   deps: Pick<UpdateDeps, "inspectMarketplace" | "installMarketplace"> = {},
-): Promise<void> {
-  if (ctx.options.marketplace === false) return
-  if (ctx.cancel.requested) return
-  if (!ctx.detection.spicetify.available) return
+): Promise<{ installed: boolean }> {
+  if (ctx.options.marketplace === false) return { installed: false }
+  if (ctx.cancel.requested) return { installed: false }
+  if (!ctx.detection.spicetify.available) return { installed: false }
   const runtime = cancelAwareRuntime(ctx.runtime, ctx.cancel)
   const spicetify = ctx.detection.spicetify
   try {
@@ -250,17 +250,17 @@ export async function ensureMarketplaceAfterUpgrade(
         const state = await inspect(runtime, spicetify)
         if (state && (state as { installed?: boolean }).installed === true &&
           (state as { registered?: boolean }).registered === true) {
-          return
+          return { installed: false }
         }
       } catch (error) {
         ctx.ui.warn(`Marketplace inspection failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
-        return
+        return { installed: false }
       }
     }
     const install = deps.installMarketplace ?? (await loadUpdateMarketplace())?.installMarketplace
     if (!install) {
       ctx.ui.warn("Spicetify Marketplace is not installed (marketplace module unavailable); continuing without it.")
-      return
+      return { installed: false }
     }
     let result: { status: string; error?: string; guidance?: string }
     try {
@@ -271,15 +271,18 @@ export async function ensureMarketplaceAfterUpgrade(
       })
     } catch (error) {
       ctx.ui.warn(`Marketplace installation failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
-      return
+      return { installed: false }
     }
     if (result.status === "failed") {
       const detail = result.error ? ` Detail: ${sanitizeDetail(result.error)}` : ""
       const guidance = result.guidance ? ` ${result.guidance}` : ""
       ctx.ui.warn(`Marketplace installation failed; continuing without it.${detail}${guidance}`)
+      return { installed: false }
     }
+    return { installed: result.status === "installed" }
   } catch (error) {
     ctx.ui.warn(`Marketplace setup was skipped; continuing. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+    return { installed: false }
   }
 }
 
@@ -498,18 +501,18 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
     return 1
   }
   if (detection.opencode.plugin.local) {
-    ui.error("The registered plugin is a local development path. Run `opencode-spotify setup` to switch deliberately; updates never replace it.")
+    ui.error("The registered plugin is a local development path. Run `npx opencode-spotify setup` to switch deliberately; updates never replace it.")
     return 1
   }
   const installed = detection.opencode.plugin.version
   const latestStable = ctx.versions.plugin.latest
   const latestBeta = ctx.versions.plugin.latestBeta ?? null
   if (detection.opencode.plugin.state === "unknown") {
-    ui.error(`Plugin registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`opencode-spotify doctor\`; no changes were made.`)
+    ui.error(`Plugin registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`npx opencode-spotify doctor\`; no changes were made.`)
     return 1
   }
   if (!installed) {
-    ui.error("The plugin is not registered globally. Run `opencode-spotify setup` first.")
+    ui.error("The plugin is not registered globally. Run `npx opencode-spotify setup` first.")
     return 1
   }
 
@@ -641,7 +644,7 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
 
   if (spicetifySelected) {
     if (!spicetifyInstalled) {
-      ui.error("Spicetify is not detected; run `opencode-spotify setup` instead.")
+      ui.error("Spicetify is not detected; run `npx opencode-spotify setup` instead.")
       return 1
     }
     if (!ctx.options.allowSpicetifyUpgrade) {
@@ -716,6 +719,9 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
   }
 
   // ---- combined Spicetify upgrade first ------------------------------------
+  // Tracks a Marketplace install performed above so the final apply covers
+  // it even when the bridge was already healthy.
+  let marketplaceInstalled = false
   if (spicetifySelected) {
     ui.section("Spicetify update (separate authorization)")
     const code = await presentAndRunPlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx, deps)])
@@ -723,7 +729,7 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
     if (ctx.options.dryRun) return 0
     await verifySpicetify(ctx)
     // Marketplace installs by default after the upgrade and before apply.
-    await ensureMarketplaceAfterUpgrade(ctx, deps)
+    marketplaceInstalled = (await ensureMarketplaceAfterUpgrade(ctx, deps)).installed
   }
 
   // ---- plugin + bridge plan ------------------------------------------------
@@ -739,9 +745,24 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
       run: async () => {
         const runtime = cancelAwareRuntime(ctx.runtime, ctx.cancel)
         if (oldSpec && specVersion(oldSpec)) {
-          const removed = await removeGlobalPlugin(runtime, oldSpec)
-          if (removed.cancelled) throw new OperationCancelled("update-global-registration", "Registration update cancelled")
-          if (removed.code !== 0) throw new Error(removed.error ?? "opencode plugin remove failed")
+          // Remove EVERY stale registry spec, not just the detected one:
+          // duplicate entries keep `plugin list` pinned to the old version
+          // while the re-add is a no-op ("already configured").
+          const listed = await listPlugins(runtime, neutralCwd(runtime)).catch(() => null)
+          // Fall back to the detected spec when the re-list fails, so a
+          // listing outage degrades to the previous single-remove behavior.
+          const stale = listed
+            ? stalePluginSpecs(listed, target)
+            : oldSpec && specVersion(oldSpec) && oldSpec !== target ? [oldSpec] : []
+          for (const spec of stale) {
+            if (ctx.cancel.requested) throw new OperationCancelled("update-global-registration", "Registration update cancelled")
+            const removed = await removeGlobalPlugin(runtime, spec)
+            if (removed.cancelled) throw new OperationCancelled("update-global-registration", "Registration update cancelled")
+            if (removed.code !== 0) {
+              if (spec === oldSpec) throw new Error(removed.error ?? "opencode plugin remove failed")
+              ctx.ui.warn(`Could not remove stale registration ${spec}; continuing with the remaining entries. Detail: ${removed.error ?? "unknown error"}`)
+            }
+          }
           const added = await addGlobalPlugin(runtime, target, { log: (line) => ctx.ui.line(`  ${line}`) })
           if (added.code !== 0) {
             // A failed/timed-out add may have completed server-side: reconcile
@@ -797,14 +818,18 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
   const next = await detectEnvironment(ctx.runtime)
   ctx.detection = next
   if (pluginSelected && latest && !(await verifyVersion(ctx, latest))) {
-    ui.error("The plugin registration did not verify at the requested version. Run `opencode-spotify doctor`.")
+    if (registrationReloadNeeded(ctx.detection.opencode.plugin, latest)) {
+      ui.error(`The global configuration already targets ${latest} but OpenCode still reports ${ctx.detection.opencode.plugin.version ?? "an older version"}. Restart running OpenCode processes (or run \`opencode service restart\`), then rerun \`npx opencode-spotify update\`.`)
+    } else {
+      ui.error("The plugin registration did not verify at the requested version. Run `npx opencode-spotify doctor`.")
+    }
     return 1
   }
   if (bridgeSyncNeeded && (!next.bridge.installed || next.bridge.registration !== "current")) {
-    ui.error("The bridge is not synchronized after the update. Run `opencode-spotify repair`.")
+    ui.error("The bridge is not synchronized after the update. Run `npx opencode-spotify repair`.")
     return 1
   }
-  const applied = await maybeApplyBridge(ctx, next.spicetify.path, bridgeSyncNeeded)
+  const applied = await maybeApplyBridge(ctx, next.spicetify.path, bridgeSyncNeeded || marketplaceInstalled)
   if (applied.code !== 0) return applied.code
   renderUpdateSummary(ui, createUpdateSummary({
     plugin: {

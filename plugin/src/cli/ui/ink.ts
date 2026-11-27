@@ -580,6 +580,9 @@ export async function createInkPresentation(
     if (instance) {
       const current = instance
       instance = null
+      // One frame flush (~60ms at maxFps 20) so React/Ink commits the final
+      // Done frame before unmount instead of freezing on the pre-run snapshot.
+      try { await new Promise((resolve) => setTimeout(resolve, 60)) } catch { /* timer unavailable */ }
       try { current.unmount() } catch { /* already unmounted */ }
     }
     try { stdin.pause?.() } catch { /* stream already gone */ }

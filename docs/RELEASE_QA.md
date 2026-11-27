@@ -35,7 +35,7 @@ source SHA and run ID. A locally verified candidate is useful for local QA;
 it does not by itself establish which GitHub run will supply the artifact.
 
 ```powershell
-$tgz = (Resolve-Path '.\opencode-spotify-0.6.0-beta.3.tgz').Path
+$tgz = (Resolve-Path '.\opencode-spotify-0.6.0.tgz').Path
 $side = "$tgz.sha256"
 Get-Item $tgz | Select-Object FullName, Length, LastWriteTime
 Get-Content $side
@@ -101,7 +101,7 @@ real OpenCode config, Spicetify directories, bridge credentials, or PATH.
 
 ```powershell
 $root   = Join-Path $env:TEMP ("ocsp-qa-" + [guid]::NewGuid().ToString('N'))
-$tgz    = (Resolve-Path '.\opencode-spotify-0.6.0-beta.3.tgz').Path  # exact archive checked in §0
+$tgz    = (Resolve-Path '.\opencode-spotify-0.6.0.tgz').Path  # exact archive checked in §0
 $home   = Join-Path $root 'home'
 $prefix = Join-Path $root 'prefix'
 $config = Join-Path $root 'config'
@@ -164,8 +164,8 @@ if (-not (Test-Path (Join-Path $pkg 'package.json'))) { throw "package not insta
 Get-Content (Join-Path $pkg 'package.json') | Select-String '"version"'
 ```
 
-The installed version must be the version under test (`0.6.0-beta.3`), not an
-older beta.
+The installed version must be the version under test (`0.6.0`), not an
+older prerelease.
 
 ## 4. Register the absolute plugin path — `ISOLATED-NATIVE`
 
@@ -234,8 +234,8 @@ broad `Get-Process opencode | Stop-Process` against the real machine.
 
 ### A. Fresh setup without Spicetify
 
-Pre-publication, a registry-fresh `setup` cannot run: beta.3 has no registry
-artifact. Use the installed package as the registration spec. Define a
+A registry-fresh `setup` runs against the published package: `npx opencode-spotify
+setup` installs the current `latest`. Use the installed package as the registration spec below when verifying a local tarball byte-for-byte. Define a
 forward-slash form because `--package-spec` accepts `/`, not `\`:
 
 ```powershell
@@ -374,8 +374,9 @@ opencode-spotify setup --spicetify=auto
       Marketplace directories unchanged).
 - [ ] Cancelling or timing out kills the tree once and rolls back PATH/partial
       install only after confirmed exit.
-- [ ] An existing winget/scoop/choco copy is never overlaid; its manager is
-      used. Unknown ownership is refused.
+- [ ] An existing winget/scoop/choco copy is never overlaid; it is migrated
+      through the pinned official installer (manager removed first). Unknown
+      ownership is disclosed, never deleted.
 
 ### I. Uninstall against real state
 
@@ -408,9 +409,9 @@ succeeded. Replace the version with the published prerelease and re-run the
 matrix against the registry artifact.
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 setup
-npx opencode-spotify@0.6.0-beta.3 status --json
-npx opencode-spotify@0.6.0-beta.3 update --dry-run
+npx opencode-spotify setup
+npx opencode-spotify status --json
+npx opencode-spotify update --dry-run
 npx opencode-spotify@beta setup
 ```
 
@@ -460,5 +461,6 @@ engineering change, not per candidate:
       sidecars at release time; stale retained candidates removed or re-verified.
 - [ ] Green CI on the launch commit; branch protection requires both Windows CI
       checks; repo settings applied (see [MAINTAINERS.md](MAINTAINERS.md)).
-- [ ] First publish stays manual; publication goes to `beta` without moving
-      `latest`; stable promotion only after its own QA.
+- [ ] Tag-triggered OIDC publication stays green; `latest` moves only on a
+      stable tag run, `beta` only on a prerelease tag run; stable promotion
+      only after its own QA.

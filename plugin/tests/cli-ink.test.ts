@@ -401,6 +401,26 @@ test("System block is a compact 4-line summary", () => {
   assert.match(system, /Bridge current \| port free/)
 })
 
+test("System block marks an owned busy port active and a foreign one a conflict", () => {
+  const owned = toInkView(baseSnapshot({
+    detection: { ...detection, port: { busy: true, likelyOwnedByThisPlugin: true } },
+  }), 72)
+  const ownedText = owned.rows.map((row) => row.text).join("\n")
+  assert.match(ownedText, /\[x\] Bridge current \(active\)/)
+  assert.doesNotMatch(ownedText, /port conflict/)
+
+  const conflict = toInkView(baseSnapshot({
+    detection: { ...detection, port: { busy: true, likelyOwnedByThisPlugin: false } },
+  }), 72)
+  const conflictText = conflict.rows.map((row) => row.text).join("\n")
+  assert.match(conflictText, /\[ \] Bridge current \| port conflict/)
+
+  const unknown = toInkView(baseSnapshot({
+    detection: { ...detection, port: { busy: true, likelyOwnedByThisPlugin: null } },
+  }), 72)
+  assert.match(unknown.rows.map((row) => row.text).join("\n"), /\[ \] Bridge current \| port conflict/)
+})
+
 test("progress rows carry explicit percentages with an ASCII fallback bar", () => {
   const view = toInkView(
     baseSnapshot({ progress: { scope: "install", message: "Fetching package", percent: 40 } }),

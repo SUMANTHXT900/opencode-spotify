@@ -42,7 +42,7 @@ runtime dependencies it needs; the host does not inject them.
 ## Install
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 setup
+npx opencode-spotify setup
 ```
 
 `setup` performs the global registration itself as one of its plan steps, so no
@@ -77,10 +77,10 @@ Then open Spotify and OpenCode in either order.
 | `uninstall` | Remove the global registration and owned bridge files |
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 setup
-npx opencode-spotify@0.6.0-beta.3 status --json
-npx opencode-spotify@0.6.0-beta.3 update --dry-run
-npx opencode-spotify@0.6.0-beta.3 doctor
+npx opencode-spotify setup
+npx opencode-spotify status --json
+npx opencode-spotify update --dry-run
+npx opencode-spotify doctor
 ```
 
 `--json` is accepted by `status` and `doctor` only; other commands reject it with
@@ -92,7 +92,7 @@ setup). Useful flags: `--dry-run`, `--yes`, `--offline`, `--spicetify
 ## Uninstall
 
 ```powershell
-npx opencode-spotify@0.6.0-beta.3 uninstall
+npx opencode-spotify uninstall
 ```
 
 `uninstall` defaults to **plugin-only**: it removes the global registration and the

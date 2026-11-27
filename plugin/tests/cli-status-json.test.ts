@@ -539,3 +539,23 @@ test("a legacy manager Spicetify copy gets a migration note toward the official 
   const clean = await doctorJson()
   assert.equal(clean.report.checks.find((check) => check.id === "spicetify-manager"), undefined)
 })
+
+test("doctor warns on duplicate global registrations with cleanup guidance", async () => {
+  const { report, code } = await doctorJson((_runtime, detection) => {
+    detection.opencode.plugin = {
+      ...detection.opencode.plugin,
+      duplicates: [
+        { id: "opencode-spotify", version: "0.6.0-beta.3", source: "opencode-spotify@0.6.0-beta.3" },
+      ],
+    };
+  })
+  assert.equal(code, 0)
+  const check = report.checks.find((entry) => entry.id === "registration-duplicates")
+  assert.ok(check, "duplicate registrations produce a dedicated check")
+  assert.equal(check?.status, "warn")
+  assert.match(check?.message ?? "", /Multiple opencode-spotify registrations/)
+  assert.match(check?.fix ?? "", /opencode plugin remove/)
+
+  const single = await doctorJson()
+  assert.equal(single.report.checks.find((entry) => entry.id === "registration-duplicates"), undefined)
+})

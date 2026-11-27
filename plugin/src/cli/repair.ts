@@ -176,7 +176,7 @@ export function assessRepair(ctx: OperationContext): RepairAssessment {
 
   if (bridgeNeedsRepair) {
     if (!detection.spicetify.available) {
-      blockers.push("Spicetify is not detected, so the owned bridge cannot be repaired automatically. Install Spicetify once with `opencode-spotify setup`, then rerun repair. Repair will not install it.")
+      blockers.push("Spicetify is not detected, so the owned bridge cannot be repaired automatically. Install Spicetify once with `npx opencode-spotify setup`, then rerun repair. Repair will not install it.")
       for (const step of troubleshootingSteps("spicetify")) blockers.push(step)
     } else if (!detection.pwsh) {
       blockers.push("PowerShell 7 (pwsh) is not available, so the owned bridge cannot be repaired automatically. Install PowerShell 7 and rerun repair.")
@@ -254,7 +254,7 @@ async function runForcedResync(ctx: OperationContext): Promise<number> {
   const next = await detectEnvironment(ctx.runtime)
   ctx.detection = next
   if (!next.bridge.installed || next.bridge.registration !== "current") {
-    ctx.ui.error("The bridge is not synchronized after the re-sync. Review `opencode-spotify doctor`.")
+    ctx.ui.error("The bridge is not synchronized after the re-sync. Review `npx opencode-spotify doctor`.")
     return 1
   }
   const applied = await maybeApplyBridge(ctx, next.spicetify.path, true)
@@ -291,7 +291,7 @@ export async function runRepair(ctx: OperationContext): Promise<number> {
     return 1
   }
   if (detection.opencode.plugin.state === "unknown") {
-    ui.error(`Global registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`opencode-spotify doctor\`; no changes were made and no blind retry was attempted.`)
+    ui.error(`Global registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`npx opencode-spotify doctor\`; no changes were made and no blind retry was attempted.`)
     return 1
   }
 
@@ -327,7 +327,7 @@ export async function runRepair(ctx: OperationContext): Promise<number> {
     })
     for (const line of renderRepairViewPlain(view)) ui.line(line)
     if (detection.bridge.registration === "current") {
-      ui.line("  Run `opencode-spotify doctor` for a full read-only diagnostics report.")
+      ui.line("  Run `npx opencode-spotify doctor` for a full read-only diagnostics report.")
     }
     return 0
   }
@@ -380,7 +380,7 @@ export async function runRepair(ctx: OperationContext): Promise<number> {
     return 1
   }
   if (assessment.bridgeNeedsRepair && (!next.bridge.installed || next.bridge.registration !== "current")) {
-    ui.error("The bridge remains inconsistent after repair. Review `opencode-spotify doctor`.")
+    ui.error("The bridge remains inconsistent after repair. Review `npx opencode-spotify doctor`.")
     return 1
   }
 

@@ -4,8 +4,8 @@
 
 | Version | Support |
 |---|---|
-| 0.6.0-beta.x (Windows) | Best-effort prerelease support |
-| ≤ 0.5.7 | Player-only; distribution fixes land in 0.6.0 |
+| 0.6.0 (Windows) | Supported stable release |
+| ≤ 0.5.7 | Player-only; distribution fixes land in 0.6.x |
 
 ## Reporting a vulnerability
 

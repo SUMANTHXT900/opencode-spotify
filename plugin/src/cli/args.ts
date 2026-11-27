@@ -96,7 +96,7 @@ export function helpText(): string {
   return `OpenCode Spotify installer
 
 Usage:
-  opencode-spotify [command] [options]
+  npx opencode-spotify [command] [options]
 
 Commands:
   setup       Install, or maintain an existing installation (default)
@@ -126,11 +126,11 @@ Options:
   -v, --version             Show the installer version
 
 Examples:
-  opencode-spotify
-  opencode-spotify setup
-  opencode-spotify status --json
-  opencode-spotify doctor
-  opencode-spotify update --dry-run
+  npx opencode-spotify
+  npx opencode-spotify setup
+  npx opencode-spotify status --json
+  npx opencode-spotify doctor
+  npx opencode-spotify update --dry-run
   npx opencode-spotify@0.6.0-beta.3 setup
 `
 }

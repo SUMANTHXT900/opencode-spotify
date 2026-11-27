@@ -882,3 +882,34 @@ test("fresh setup prints the service-restart guidance and installs Marketplace b
   assert.equal(await runSetup(ctx, deps), 0, ui.lines.join("\n"))
   assert.match(ui.lines.join("\n"), /opencode service restart/i)
 })
+
+test("fresh setup applies when Marketplace is newly installed even with a current bridge", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = null
+  // Bridge already current: no bridge step, so any apply must come from Marketplace.
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt({ confirms: [true, true] }), { command: "setup", yes: false })
+  ctx.detection = fakeDetection(runtime)
+  const deps: EnsureSpicetifyDeps = {
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async () => ({ status: "installed" as const }),
+  }
+  assert.equal(await runSetup(ctx, deps), 0, ui.lines.join("\n"))
+  const applied = runtime.calls.some((call) => call.file.includes("spicetify") && call.args.join(" ") === "apply")
+  assert.equal(applied, true, "newly installed Marketplace triggers spicetify apply")
+})
+
+test("fresh setup skips apply when Marketplace is already present and the bridge is current", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = null
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt({ confirms: [true] }), { command: "setup", yes: false })
+  ctx.detection = fakeDetection(runtime)
+  const deps: EnsureSpicetifyDeps = {
+    inspectMarketplace: async () => ({ installed: true, registered: true }),
+    installMarketplace: async () => { throw new Error("must not install when already present") },
+  }
+  assert.equal(await runSetup(ctx, deps), 0, ui.lines.join("\n"))
+  const applied = runtime.calls.some((call) => call.file.includes("spicetify") && call.args.join(" ") === "apply")
+  assert.equal(applied, false, "no apply when nothing was prepared")
+})

@@ -6,11 +6,11 @@
 //   * inspectMarketplace is read-only (zero side effects),
 //   * resolveMarketplaceRelease discovers the latest Marketplace .zip from
 //     GitHub with bounded timeout + size cap,
-//   * installMarketplace downloads the verified zip to a private temp dir,
-//     rejects traversal entries, extracts via PowerShell (no Invoke-Expression),
-//     handles flat and single-nested layouts, copies to
-//     %APPDATA%\\spicetify\\CustomApps\\marketplace and registers via
-//     `spicetify config` commands.
+//   * installMarketplace downloads the verified zip to a private temp dir
+//     (following GitHub release-asset redirects safely), rejects traversal
+//     entries, extracts via PowerShell (no Invoke-Expression), handles flat
+//     and single-nested layouts, copies to the Marketplace CustomApp dir and
+//     registers ONLY via `spicetify config custom_apps marketplace`.
 // On any error the temp dir is removed and a sanitized { status: "failed" }
 // is returned so callers warn without failing core setup.
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -31,6 +31,91 @@ const METADATA_TIMEOUT_MS = 12_000;
 const METADATA_MAX_BYTES = 512 * 1024;
 const ZIP_TIMEOUT_MS = 60_000;
 const ZIP_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Hosts a Marketplace release download is allowed to redirect to. GitHub
+ * release assets always 302 away from github.com to a CDN host; anything
+ * else (or plain http:) is refused fail-closed.
+ */
+export const MARKETPLACE_REDIRECT_ALLOWLIST = new Set([
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+  "codeload.github.com",
+]);
+
+const MARKETPLACE_MAX_REDIRECTS = 3;
+
+function redirectRefused(reason: string): Error {
+  const error = new Error(`E_DOWNLOAD_REDIRECT: ${reason}`);
+  (error as { code?: string }).code = "E_DOWNLOAD_REDIRECT";
+  return error;
+}
+
+/**
+ * Bounded safe redirect follower for the Marketplace zip download
+ * (`redirect: "manual"`, max 3 hops). Only https: URLs on
+ * MARKETPLACE_REDIRECT_ALLOWLIST are followed; anything else throws
+ * fail-closed. Non-redirect responses are returned untouched.
+ */
+export async function fetchMarketplaceBytes(
+  fetcher: typeof fetch,
+  url: string,
+  signal: AbortSignal,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop <= MARKETPLACE_MAX_REDIRECTS; hop++) {
+    const response = await fetcher(current, {
+      headers: { "User-Agent": "opencode-spotify-installer", "Cache-Control": "no-cache" },
+      redirect: "manual",
+      signal,
+    });
+    if (
+      response.status !== 301 && response.status !== 302 && response.status !== 303 &&
+      response.status !== 307 && response.status !== 308
+    ) {
+      return response;
+    }
+    if (hop === MARKETPLACE_MAX_REDIRECTS) {
+      throw redirectRefused(`redirect limit exceeded (${MARKETPLACE_MAX_REDIRECTS} hops, possible loop); refusing to continue.`);
+    }
+    const location = response.headers.get("location");
+    if (!location) {
+      throw redirectRefused("redirect is missing a location header; refusing to continue.");
+    }
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw redirectRefused("redirect location is not a valid URL; refusing to continue.");
+    }
+    if (next.protocol !== "https:") {
+      throw redirectRefused(`redirect target uses ${next.protocol} (only https: is allowed); refusing to follow.`);
+    }
+    if (!MARKETPLACE_REDIRECT_ALLOWLIST.has(next.hostname.toLowerCase())) {
+      throw redirectRefused(`redirect target host ${next.hostname} is not trusted; refusing to follow.`);
+    }
+    current = next.toString();
+  }
+  throw redirectRefused("redirect loop detected.");
+}
+
+/** Include the underlying error.cause (message/code) so network failures never collapse to "fetch failed". */
+function describeCause(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error === "string" && error ? error : "unknown error";
+  const bits = [error.message];
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    if (cause.message) bits.push(`cause: ${cause.message}`);
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === "string" && code) bits.push(`code: ${code}`);
+  } else if (typeof cause === "string" && cause) {
+    bits.push(`cause: ${cause}`);
+  } else if (cause !== undefined && cause !== null) {
+    bits.push(`cause: ${String(cause).slice(0, 80)}`);
+  }
+  return bits.filter(Boolean).join(" | ") || "unknown error";
+}
 
 function appDataDir(runtime: Runtime): string {
   return runtime.env.APPDATA || join(runtime.homedir, "AppData", "Roaming");
@@ -206,8 +291,8 @@ export async function resolveMarketplaceRelease(
     if (options.cancel?.requested) {
       return { ok: false, code: "E_RELEASE_LOOKUP", error: "Cancelled during Marketplace release resolution." };
     }
-    const detail = error instanceof Error && error.message ? error.message : "release lookup failed";
-    return { ok: false, code: "E_RELEASE_LOOKUP", error: `Marketplace release metadata could not be retrieved: ${detail.slice(0, 200)}` };
+    const detail = describeCause(error).slice(0, 300);
+    return { ok: false, code: "E_RELEASE_LOOKUP", error: `Marketplace release metadata could not be retrieved: ${detail}` };
   }
   if (!response.ok) {
     const limit = rateLimitDetails(response, nowMs);
@@ -232,8 +317,8 @@ export async function resolveMarketplaceRelease(
   try {
     text = await response.text();
   } catch (error) {
-    const detail = error instanceof Error && error.message ? error.message : "body read failed";
-    return { ok: false, code: "E_RELEASE_LOOKUP", error: `Marketplace release metadata could not be read: ${detail.slice(0, 200)}` };
+    const detail = describeCause(error).slice(0, 300);
+    return { ok: false, code: "E_RELEASE_LOOKUP", error: `Marketplace release metadata could not be read: ${detail}` };
   }
   if (Buffer.byteLength(text, "utf8") > METADATA_MAX_BYTES) {
     return { ok: false, code: "E_RELEASE_INVALID", error: "Marketplace release metadata is larger than the accepted 512 KiB cap" };
@@ -352,7 +437,7 @@ function offlineGuidance(runtime: Runtime): string {
     "Offline mode: Marketplace was not installed.",
     `Manually download the latest Marketplace .zip from https://github.com/${SPICETIFY_MARKETPLACE_REPO}/releases/latest,`,
     `extract the folder containing manifest.json and index.js to ${dir},`,
-    "then run `spicetify config custom_apps marketplace` and `spicetify config inject_css 1 replace_colors 1 overwrite_assets 1` followed by `spicetify apply`.",
+    "then run `spicetify config custom_apps marketplace` followed by `spicetify apply`.",
   ].join(" ");
 }
 
@@ -516,16 +601,14 @@ export async function installMarketplace(
       const fetcher = options.fetcher ?? fetch;
       const signals: AbortSignal[] = [AbortSignal.timeout(ZIP_TIMEOUT_MS)];
       if (options.cancel) signals.push(options.cancel.signal);
+      const signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
       let response: Response;
       try {
-        response = await fetcher(release.assetUrl, {
-          headers: { "User-Agent": "opencode-spotify-installer", "Cache-Control": "no-cache" },
-          redirect: "error",
-          signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals),
-        });
+        // GitHub release assets always 302 to a CDN host; follow safely.
+        response = await fetchMarketplaceBytes(fetcher, release.assetUrl, signal);
       } catch (error) {
         if (options.cancel?.requested) return { status: "failed", error: "Cancelled by the user." };
-        return { status: "failed", error: sanitizeMarketplaceError(error instanceof Error ? error.message : "Marketplace download failed") };
+        return { status: "failed", error: sanitizeMarketplaceError(describeCause(error).slice(0, 400)) };
       }
       if (options.cancel?.requested) return { status: "failed", error: "Cancelled by the user." };
       if (!response.ok) {
@@ -662,23 +745,6 @@ export async function installMarketplace(
     if (first.cancelled || options.cancel?.requested) return { status: "failed", error: "Cancelled by the user." };
     if (first.code !== 0) {
       return { status: "failed", error: sanitizeMarketplaceError(`E_REGISTER: spicetify config custom_apps marketplace failed (exit ${first.code}).`) };
-    }
-    let second: { code: number; cancelled?: boolean; error?: string };
-    try {
-      second = await runtime.run(
-        spicetifyExe,
-        ["config", "inject_css", "1", "replace_colors", "1", "overwrite_assets", "1"],
-        {
-          timeoutMs: configTimeout,
-          ...(options.cancel ? { cancel: options.cancel } : {}),
-        },
-      );
-    } catch (error) {
-      return { status: "failed", error: sanitizeMarketplaceError(error instanceof Error ? error.message : "Marketplace css registration could not start") };
-    }
-    if (second.cancelled || options.cancel?.requested) return { status: "failed", error: "Cancelled by the user." };
-    if (second.code !== 0) {
-      return { status: "failed", error: sanitizeMarketplaceError(`E_REGISTER: spicetify config inject_css failed (exit ${second.code}).`) };
     }
 
     return { status: "installed" };

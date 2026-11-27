@@ -211,7 +211,7 @@ export function pluginAvailabilityLine(view: PluginUpdateView): string {
     case "registry-older":
       return `${installed} (registry reports ${view.latest ?? "an older tag"}; downgrades are never automatic)`
     case "not-installed":
-      return "not registered (run `opencode-spotify setup`)"
+      return "not registered (run `npx opencode-spotify setup`)"
     case "unknown":
     default:
       return `${installed} (available version unknown)`
@@ -324,7 +324,7 @@ export function updateReadiness(model: UpdateViewModel): UpdateReadinessView {
     return {
       status: "blocked",
       code: 1,
-      message: "The registered plugin is a local development path. Run `opencode-spotify setup` to switch deliberately; updates never replace it.",
+      message: "The registered plugin is a local development path. Run `npx opencode-spotify setup` to switch deliberately; updates never replace it.",
       ...shared,
     }
   }
@@ -332,7 +332,7 @@ export function updateReadiness(model: UpdateViewModel): UpdateReadinessView {
     return {
       status: "blocked",
       code: 1,
-      message: "Plugin registration state is unknown (inspection failed). Rerun `opencode-spotify doctor`; no changes were made.",
+      message: "Plugin registration state is unknown (inspection failed). Rerun `npx opencode-spotify doctor`; no changes were made.",
       hint: "No blind retry is attempted while the registration state is unknown.",
       ...shared,
     }
@@ -341,7 +341,7 @@ export function updateReadiness(model: UpdateViewModel): UpdateReadinessView {
     return {
       status: "blocked",
       code: 1,
-      message: "The plugin is not registered globally. Run `opencode-spotify setup` first.",
+      message: "The plugin is not registered globally. Run `npx opencode-spotify setup` first.",
       ...shared,
     }
   }
@@ -367,7 +367,7 @@ export function updateReadiness(model: UpdateViewModel): UpdateReadinessView {
       status: "blocked",
       code: 1,
       message: "The backend reported an update but selected no install target. No changes were made.",
-      hint: "Rerun `opencode-spotify status` or retry when registry metadata is complete.",
+      hint: "Rerun `npx opencode-spotify status` or retry when registry metadata is complete.",
       ...shared,
     }
   }

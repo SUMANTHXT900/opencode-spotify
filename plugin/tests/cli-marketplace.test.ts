@@ -402,7 +402,8 @@ test("flat zip installs and registers via spicetify config", async () => {
     assert.equal(existsSync(join(appData, "spicetify", "CustomApps", "marketplace", "index.js")), true);
     const cmds = runtime.runCalls.map((c) => `${c.file} ${c.args.join(" ")}`);
     assert.ok(cmds.some((c) => c === "C:\\sp.exe config custom_apps marketplace"));
-    assert.ok(cmds.some((c) => c === "C:\\sp.exe config inject_css 1 replace_colors 1 overwrite_assets 1"));
+    assert.ok(cmds.every((c) => !c.includes("inject_css") && !c.includes("replace_colors") && !c.includes("overwrite_assets") && !c.includes("color_scheme") && !c.includes("current_theme")),
+      "Marketplace install must not write any theme config");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -521,6 +522,174 @@ test("soft failure isolates errors and sanitizes secrets", async () => {
     const error = (result as { error: string }).error;
     assert.ok(!error.includes(secret), "secrets must be redacted");
     assert.match(error, /E_REGISTER|failed/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function redirectResponse(location: string, status = 302): Response {
+  return new Response(null, { status, headers: { location } });
+}
+
+function zipResponse(zip: Uint8Array): Response {
+  return new Response(Buffer.from(zip), {
+    status: 200,
+    headers: { "content-type": "application/zip", "content-length": String(zip.length) },
+  });
+}
+
+function testRelease(zip: Uint8Array) {
+  return {
+    version: "9.9.9",
+    tag: "v9.9.9",
+    assetName: "marketplace.zip",
+    assetUrl: "https://github.com/spicetify/marketplace/releases/download/v9.9.9/marketplace.zip",
+    size: zip.length,
+    releaseId: 9,
+    publishedAt: null,
+    fetchedAt: 0,
+  };
+}
+
+function writePayload(destDir: string) {
+  writeFileSync(join(destDir, "manifest.json"), '{"name":"marketplace"}', "utf8");
+  writeFileSync(join(destDir, "index.js"), "console.log(1)", "utf8");
+}
+
+test("github 302 redirect to objects.githubusercontent.com succeeds", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mp-redir-ok-"));
+  try {
+    const appData = join(root, "Roaming");
+    const zip = makeZip([
+      { name: "manifest.json", content: '{"name":"marketplace"}' },
+      { name: "index.js", content: "console.log(1)" },
+    ]);
+    const seen: string[] = [];
+    const runtime = realRuntime(appData, async () => ({ code: 0, stdout: "", stderr: "" }));
+    const result = await installMarketplace(runtime, { path: "C:\\sp.exe", configPath: null } as never, {
+      release: testRelease(zip),
+      fetcher: (async (url: string) => {
+        seen.push(url);
+        if (url.startsWith("https://github.com/")) {
+          return redirectResponse("https://objects.githubusercontent.com/abc123/marketplace.zip");
+        }
+        assert.equal(url, "https://objects.githubusercontent.com/abc123/marketplace.zip");
+        return zipResponse(zip);
+      }) as typeof fetch,
+      extractZip: async (_zipPath, destDir) => { writePayload(destDir); },
+    });
+    assert.equal(result.status, "installed", (result as { error?: string }).error);
+    assert.deepEqual(seen, [
+      "https://github.com/spicetify/marketplace/releases/download/v9.9.9/marketplace.zip",
+      "https://objects.githubusercontent.com/abc123/marketplace.zip",
+    ]);
+    assert.equal(existsSync(join(appData, "spicetify", "CustomApps", "marketplace", "manifest.json")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("redirect to an untrusted host or http fails closed", async () => {
+  for (const location of ["https://evil.example/a.zip", "http://objects.githubusercontent.com/a.zip"]) {
+    const root = mkdtempSync(join(tmpdir(), "mp-redir-bad-"));
+    try {
+      const appData = join(root, "Roaming");
+      const zip = makeZip([
+        { name: "manifest.json", content: "{}" },
+        { name: "index.js", content: "x" },
+      ]);
+      let fetches = 0;
+      const runtime = realRuntime(appData, async () => { throw new Error("must not run after refused redirect"); });
+      const result = await installMarketplace(runtime, { path: "C:\\sp.exe", configPath: null } as never, {
+        release: testRelease(zip),
+        fetcher: (async () => {
+          fetches += 1;
+          return redirectResponse(location);
+        }) as typeof fetch,
+        extractZip: async () => { throw new Error("must not extract after refused redirect"); },
+      });
+      assert.equal(result.status, "failed", location);
+      assert.match((result as { error: string }).error, /E_DOWNLOAD_REDIRECT|not trusted|only https/i, location);
+      assert.equal(fetches, 1, "no follow-up fetch after refusal");
+      assert.equal(runtime.runCalls.length, 0);
+      assert.equal(existsSync(join(appData, "spicetify", "CustomApps", "marketplace")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("redirect loop beyond 3 hops fails closed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mp-redir-loop-"));
+  try {
+    const appData = join(root, "Roaming");
+    const zip = makeZip([
+      { name: "manifest.json", content: "{}" },
+      { name: "index.js", content: "x" },
+    ]);
+    let fetches = 0;
+    const runtime = realRuntime(appData, async () => { throw new Error("must not run in a loop"); });
+    const result = await installMarketplace(runtime, { path: "C:\\sp.exe", configPath: null } as never, {
+      release: testRelease(zip),
+      fetcher: (async (url: string) => {
+        fetches += 1;
+        return redirectResponse(`https://github.com/spicetify/marketplace/loophop${fetches}`);
+      }) as typeof fetch,
+      extractZip: async () => { throw new Error("must not extract in a loop"); },
+    });
+    assert.equal(result.status, "failed");
+    assert.match((result as { error: string }).error, /redirect limit|loop|E_DOWNLOAD_REDIRECT/i);
+    assert.equal(fetches, 4, "initial fetch plus exactly 3 followed hops");
+    assert.equal(runtime.runCalls.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("network failure preserves error.cause detail", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mp-cause-"));
+  try {
+    const appData = join(root, "Roaming");
+    const zip = makeZip([
+      { name: "manifest.json", content: "{}" },
+      { name: "index.js", content: "x" },
+    ]);
+    const runtime = realRuntime(appData, async () => { throw new Error("must not run after network failure"); });
+    const failure = new Error("fetch failed");
+    (failure as { cause?: unknown }).cause = Object.assign(new Error("getaddrinfo ENOTFOUND github.com"), { code: "ENOTFOUND" });
+    const result = await installMarketplace(runtime, { path: "C:\\sp.exe", configPath: null } as never, {
+      release: testRelease(zip),
+      fetcher: (async () => { throw failure; }) as typeof fetch,
+    });
+    assert.equal(result.status, "failed");
+    const error = (result as { error: string }).error;
+    assert.match(error, /ENOTFOUND/, "cause code is preserved");
+    assert.match(error, /getaddrinfo/, "cause message is preserved");
+    assert.equal(runtime.runCalls.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("only spicetify config custom_apps marketplace is ever run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mp-onlyreg-"));
+  try {
+    const appData = join(root, "Roaming");
+    const runtime = realRuntime(appData, async () => ({ code: 0, stdout: "", stderr: "" }));
+    const zip = makeZip([
+      { name: "manifest.json", content: "{}" },
+      { name: "index.js", content: "x" },
+    ]);
+    const result = await installMarketplace(runtime, { path: "C:\\sp.exe", configPath: null } as never, {
+      zipBytes: zip,
+      release: testRelease(zip),
+      extractZip: async (_zipPath, destDir) => { writePayload(destDir); },
+    });
+    assert.equal(result.status, "installed", (result as { error?: string }).error);
+    const spCalls = runtime.runCalls
+      .filter((c) => c.file === "C:\\sp.exe")
+      .map((c) => `${c.file} ${c.args.join(" ")}`);
+    assert.deepEqual(spCalls, ["C:\\sp.exe config custom_apps marketplace"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -79,7 +79,7 @@ export async function main(argv: string[], dependencies: MainDependencies = {}):
   const log = loggerFor(dependencies)
   if (parsed.error) {
     log.err(`Error: ${parsed.error}`)
-    log.err("Run opencode-spotify --help for usage.")
+    log.err("Run npx opencode-spotify --help for usage.")
     return 2
   }
   const options = parsed.options
@@ -219,18 +219,21 @@ export async function main(argv: string[], dependencies: MainDependencies = {}):
       if (cancel.requested) return 130
       const code = await execute(options.command, ctx)
       if (inkStore) {
+        // Final snapshot before the result: prefer the post-run detection the
+        // workflow already refreshed (no extra pass); otherwise take one fresh
+        // pass for mutating commands. Read-only commands reuse the pre-run
+        // detection (nothing could have changed; zero extra commands).
+        try {
+          const finalDetection = ctx.detection !== detection
+            ? ctx.detection
+            : mutating ? await detectEnvironment(runtime) : detection
+          inkStore.dispatch({ type: "detection", detection: finalDetection, at: runtime.now() })
+        } catch { /* best effort; the pre-run state stays visible */ }
         inkStore.dispatch({ type: "result", code, at: runtime.now() })
       }
       return code
     }
     const code = await run()
-    // Refresh the Done screen: workflows replace ctx.detection after mutating.
-    if (inkStore) {
-      try {
-        const finalDetection = await detectEnvironment(runtime)
-        inkStore.dispatch({ type: "detection", detection: finalDetection, at: runtime.now() })
-      } catch { /* best effort; the pre-run state stays visible */ }
-    }
     // A real failure/confirmation-required code always wins over cancellation.
     if (code !== 0) return code
     if (cancel.requested) return 130

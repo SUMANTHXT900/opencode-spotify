@@ -7,7 +7,7 @@ import type { CancelToken } from "./cancel.ts"
 // @ts-ignore – resolves once Agent 1's marketplace module lands.
 import type * as MarketplaceContract from "./marketplace.ts"
 import { detectEnvironment } from "./detect.ts"
-import { addGlobalPlugin, projectPlugins, reconcileRegistration, removeGlobalPlugin } from "./opencode.ts"
+import { addGlobalPlugin, listPlugins, neutralCwd, projectPlugins, reconcileRegistration, removeGlobalPlugin, stalePluginSpecs } from "./opencode.ts"
 import { bridgeOperation } from "./bridge.ts"
 import {
   compareVersions,
@@ -490,12 +490,12 @@ export interface EnsureSpicetifyDeps extends OfficialInstallerDeps {
 export async function ensureMarketplace(
   ctx: OperationContext,
   deps: Pick<EnsureSpicetifyDeps, "inspectMarketplace" | "installMarketplace"> = {},
-): Promise<void> {
-  if (ctx.options.marketplace === false) return
-  if (ctx.cancel.requested) return
+): Promise<{ installed: boolean }> {
+  if (ctx.options.marketplace === false) return { installed: false }
+  if (ctx.cancel.requested) return { installed: false }
   const runtime = cancelAwareRuntime(ctx.runtime, ctx.cancel)
   const spicetify = ctx.detection.spicetify
-  if (!spicetify.available) return
+  if (!spicetify.available) return { installed: false }
   try {
     const inspect = deps.inspectMarketplace ?? (await loadMarketplace())?.inspectMarketplace
     if (inspect) {
@@ -503,17 +503,17 @@ export async function ensureMarketplace(
         const state = await inspect(runtime, spicetify)
         if (state && (state as { installed?: boolean }).installed === true &&
           (state as { registered?: boolean }).registered === true) {
-          return
+          return { installed: false }
         }
       } catch (error) {
         ctx.ui.warn(`Marketplace inspection failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
-        return
+        return { installed: false }
       }
     }
     const install = deps.installMarketplace ?? (await loadMarketplace())?.installMarketplace
     if (!install) {
       ctx.ui.warn("Spicetify Marketplace is not installed (marketplace module unavailable); continuing without it. Re-run setup without --no-marketplace once the marketplace module is available.")
-      return
+      return { installed: false }
     }
     let result: { status: string; error?: string; guidance?: string }
     try {
@@ -524,15 +524,18 @@ export async function ensureMarketplace(
       })
     } catch (error) {
       ctx.ui.warn(`Marketplace installation failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
-      return
+      return { installed: false }
     }
     if (result.status === "failed") {
       const detail = result.error ? ` Detail: ${sanitizeDetail(result.error)}` : ""
       const guidance = result.guidance ? ` ${result.guidance}` : ""
       ctx.ui.warn(`Marketplace installation failed; continuing without it.${detail}${guidance}`)
+      return { installed: false }
     }
+    return { installed: result.status === "installed" }
   } catch (error) {
     ctx.ui.warn(`Marketplace setup was skipped; continuing. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+    return { installed: false }
   }
 }
 
@@ -771,6 +774,26 @@ function registrationStep(ctx: OperationContext, spec: string | null): PlanStep 
     run: async () => {
       ctx.ui.line(`  Running: opencode plugin add ${target} (up to 90s; progress shown after completion)`)
       const runtime = cancelAwareRuntime(ctx.runtime, ctx.cancel)
+      // Drop stale duplicate specs first: duplicates keep `plugin list`
+      // pinned to the old version while the re-add is a no-op
+      // ("already configured"). Best-effort; the add below still verifies.
+      try {
+        for (const stale of stalePluginSpecs(await listPlugins(runtime, neutralCwd(runtime)), target)) {
+          if (ctx.cancel.requested) throw cancelledStepError("register-global-plugin", "Global plugin registration was cancelled")
+          const removed = await removeGlobalPlugin(runtime, stale).catch(() => undefined)
+          if (!removed) {
+            ctx.ui.warn(`Could not remove stale registration ${stale}; continuing.`)
+            continue
+          }
+          if (removed.cancelled) throw cancelledStepError("register-global-plugin", "Global plugin registration was cancelled")
+          if (removed.code !== 0) {
+            ctx.ui.warn(`Could not remove stale registration ${stale}; continuing. Detail: ${removed.error ?? "unknown error"}`)
+          }
+        }
+      } catch (error) {
+        if (error instanceof OperationCancelled) throw error
+        ctx.ui.warn(`Stale registration cleanup was skipped; continuing. Detail: ${error instanceof Error ? error.message : "unknown error"}`)
+      }
       const result = await addGlobalPlugin(runtime, target, { log: (line) => ctx.ui.line(`  ${line}`) })
       // A cancelled mutation is not a failure: reconcile/rollback is skipped.
       if (isCancelledResult(result)) {
@@ -927,7 +950,6 @@ function printFinal(ctx: OperationContext, bridge: FinalBridgeState): void {
   if (bridge === "pending") {
     ctx.ui.warn("Spicetify apply is still pending. Run `spicetify apply` yourself, or re-run setup with --apply.")
   }
-  ctx.ui.bullet("Restart any running OpenCode process so the global plugin loads.")
   ctx.ui.bullet("Restart running OpenCode processes (or run `opencode service restart`).")
   ctx.ui.bullet("Start Spotify Desktop, then open OpenCode in any project and wait for `Spotify ● Connected`.")
   ctx.ui.bullet("Connection and playback are confirmed only in the running TUI, not by file installation.")
@@ -970,7 +992,7 @@ async function maintenance(ctx: OperationContext, deps: EnsureSpicetifyDeps = {}
     ui.success("Everything detected is current.")
   }
   if (ctx.options.nonInteractive) {
-    ui.line("  Noninteractive maintenance mode makes no changes. Run `opencode-spotify update`, `opencode-spotify repair`, or `opencode-spotify uninstall` explicitly.")
+    ui.line("  Noninteractive maintenance mode makes no changes. Run `npx opencode-spotify update`, `npx opencode-spotify repair`, or `npx opencode-spotify uninstall` explicitly.")
     return 0
   }
   const choices: { label: string; value: string }[] = []
@@ -1103,7 +1125,7 @@ export async function runSetup(ctx: OperationContext, deps: EnsureSpicetifyDeps 
 
   const detection = ctx.detection
   if (detection.opencode.plugin.state === "unknown") {
-    ui.error(`Global registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`opencode-spotify doctor\`; no changes were made and no blind retry was attempted.`)
+    ui.error(`Global registration state is unknown (inspection failed: ${detection.opencode.plugin.detail ?? "plugin list did not complete"}). Rerun \`npx opencode-spotify doctor\`; no changes were made and no blind retry was attempted.`)
     return 1
   }
   // Registered installs (including a local development path) enter the
@@ -1159,26 +1181,28 @@ export async function runSetup(ctx: OperationContext, deps: EnsureSpicetifyDeps 
   const verified = await detectEnvironment(ctx.runtime)
   refresh(ctx, verified)
   if (verified.opencode.plugin.state === "unknown") {
-    ui.error(`Global registration state is unknown (inspection failed: ${verified.opencode.plugin.detail ?? "plugin list did not complete"}). Use \`opencode-spotify doctor\` for details; no blind retry was attempted.`)
+    ui.error(`Global registration state is unknown (inspection failed: ${verified.opencode.plugin.detail ?? "plugin list did not complete"}). Use \`npx opencode-spotify doctor\` for details; no blind retry was attempted.`)
     return 1
   }
   if (!verified.opencode.plugin.registered || verified.opencode.plugin.local) {
-    ui.error("Global registration could not be verified. Use `opencode-spotify doctor` for details.")
+    ui.error("Global registration could not be verified. Use `npx opencode-spotify doctor` for details.")
     return 1
   }
   if (!verified.bridge.installed || verified.bridge.registration !== "current") {
-    ui.error("The bridge could not be verified after installation. Use `opencode-spotify repair`.")
+    ui.error("The bridge could not be verified after installation. Use `npx opencode-spotify repair`.")
     return 1
   }
   // Check cancellation before apply starts, never between apply and verification.
   if (ctx.cancel.requested) return 130
   // Marketplace installs by default after Spicetify is ready and before
-  // `spicetify apply`. Soft-fail: warnings continue, never a failure.
-  await ensureMarketplace(ctx, deps)
+  // `spicetify apply`. Soft-fail: warnings continue, never a failure. A newly
+  // installed Marketplace must also be applied, even when the bridge was
+  // already active on disk.
+  const { installed: marketplaceInstalled } = await ensureMarketplace(ctx, deps)
   if (ctx.cancel.requested) return 130
   // Only a plan that actually prepared the bridge may ask for apply. A
   // registration-only run must never prompt for `spicetify apply`.
-  const applied = await maybeApplyBridge(ctx, verified.spicetify.path, bridgeNeeded)
+  const applied = await maybeApplyBridge(ctx, verified.spicetify.path, bridgeNeeded || marketplaceInstalled)
   if (applied.code !== 0) return applied.code
   printFinal(ctx, applied.applied ? "applied" : bridgeNeeded ? "pending" : "current")
   return 0

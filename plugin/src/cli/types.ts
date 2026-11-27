@@ -108,6 +108,8 @@ export interface OpenCodePluginInfo {
   state?: "registered" | "absent" | "unknown"
   /** Sanitized inspection failure detail when state is unknown. */
   detail?: string
+  /** Additional rows with the same plugin id (duplicate registrations). */
+  duplicates?: Array<{ id: string; version: string; source: string }>
 }
 
 export interface OpenCodeInfo {

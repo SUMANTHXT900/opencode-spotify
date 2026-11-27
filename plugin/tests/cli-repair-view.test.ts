@@ -161,7 +161,7 @@ test("diagnostics view groups checks, explains fixes, and lists troubleshooting"
   assert.match(text, /Fix: Run `opencode-spotify repair`/)
   assert.match(text, /Troubleshooting/)
   assert.match(text, /1 ok, 1 warning\(s\), 2 failure\(s\), 1 info/)
-  assert.match(text, /No changes were made\. Use `opencode-spotify repair` or `setup` for fixes\./)
+  assert.match(text, /No changes were made\. Use `npx opencode-spotify repair` or `npx opencode-spotify setup` for fixes\./)
   assert.ok(noAnsi(text))
 })
 

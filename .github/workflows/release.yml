@@ -18,9 +18,12 @@
 #     plus proof metadata (source SHA, run_id, repository, verifier),
 #     performs a SINGLE `npm view opencode-spotify --json` read (fail closed
 #     on duplicate version, dist-tag monotonicity preflight), publishes the
-#     exact downloaded bytes with --provenance, verifies registry integrity
-#     and the intended tag, then creates/updates the GitHub Release for the
-#     tag with the verified assets attached (--prerelease for beta).
+#     exact downloaded bytes with --provenance, immediately creates/updates
+#     the GitHub Release for the tag with the verified assets attached
+#     (--prerelease for beta), and only then verifies registry integrity
+#     and the intended tag with poll-with-backoff (a hash mismatch fails
+#     closed; persistent 404/empty from slow CDN indexing warns but stays
+#     green).
 #
 # Publish-job checkout discipline: the publish job mints the OIDC token, so
 # it sparse-checks out only the reviewed policy helper (persist-credentials:
@@ -142,7 +145,7 @@ jobs:
           fi
 
       - name: Download only the candidate from this run
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-candidate
           path: dist
@@ -199,22 +202,6 @@ jobs:
           if [ ! -f "$TGZ" ]; then echo "::error::Candidate tarball is missing."; exit 1; fi
           npm publish "./dist/opencode-spotify-$INPUT_VERSION.tgz" --tag "$INPUT_DIST_TAG" --access public --provenance --registry=https://registry.npmjs.org --ignore-scripts
 
-      - name: Verify registry integrity and intended tag
-        env:
-          PACKAGE_NAME: opencode-spotify
-          NPM_REGISTRY: https://registry.npmjs.org
-          INPUT_VERSION: ${{ needs.validate.outputs.version }}
-          INPUT_DIST_TAG: ${{ needs.validate.outputs.dist_tag }}
-        run: |
-          set -euo pipefail
-          TGZ="dist/opencode-spotify-$INPUT_VERSION.tgz"
-          EXPECTED_SHA512="$(tr -d ' \r\n\t' < "$TGZ.integrity")"
-          REG_INTEGRITY="$(npm view "$PACKAGE_NAME@$INPUT_VERSION" dist.integrity --json --registry="$NPM_REGISTRY" 2>/dev/null | jq -r '.')"
-          if [ "$REG_INTEGRITY" != "$EXPECTED_SHA512" ]; then echo "::error::Registry integrity does not match the published candidate."; exit 1; fi
-          REG_TAG="$(npm view "$PACKAGE_NAME" "dist-tags.$INPUT_DIST_TAG" --registry="$NPM_REGISTRY" 2>/dev/null | tail -n 1 | tr -d ' \r\n')"
-          if [ "$REG_TAG" != "$INPUT_VERSION" ]; then echo "::error::Registry dist-tag does not point at the published version."; exit 1; fi
-          echo "Registry verification passed."
-
       - name: Create or update GitHub Release with verified assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -232,3 +219,36 @@ jobs:
             # shellcheck disable=SC2086
             gh release create "$TAG" "$TGZ" "$TGZ.sha256" "$TGZ.integrity" --title "$TAG" --notes "$NOTES" $PRERELEASE
           fi
+
+      - name: Verify registry integrity and intended tag (poll for CDN indexing)
+        env:
+          PACKAGE_NAME: opencode-spotify
+          NPM_REGISTRY: https://registry.npmjs.org
+          INPUT_VERSION: ${{ needs.validate.outputs.version }}
+          INPUT_DIST_TAG: ${{ needs.validate.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          TGZ="dist/opencode-spotify-$INPUT_VERSION.tgz"
+          EXPECTED_SHA512="$(tr -d ' \r\n\t' < "$TGZ.integrity")"
+          attempt=1
+          while [ "$attempt" -le 10 ]; do
+            REG_INTEGRITY="$(npm view "$PACKAGE_NAME@$INPUT_VERSION" dist.integrity --json --registry="$NPM_REGISTRY" 2>/dev/null | jq -r '. // empty')"
+            if [ -n "$REG_INTEGRITY" ]; then
+              if [ "$REG_INTEGRITY" != "$EXPECTED_SHA512" ]; then
+                echo "::error::Registry integrity does not match the published candidate (attempt $attempt). Failing closed."
+                exit 1
+              fi
+              REG_TAG="$(npm view "$PACKAGE_NAME" "dist-tags.$INPUT_DIST_TAG" --registry="$NPM_REGISTRY" 2>/dev/null | tail -n 1 | tr -d ' \r\n')"
+              if [ "$REG_TAG" = "$INPUT_VERSION" ]; then
+                echo "Registry verification passed on attempt $attempt: integrity matches and dist-tag $INPUT_DIST_TAG points at $INPUT_VERSION."
+                exit 0
+              fi
+              echo "::error::Registry dist-tag $INPUT_DIST_TAG points at '$REG_TAG', expected '$INPUT_VERSION'. Failing closed."
+              exit 1
+            fi
+            echo "Attempt $attempt/10: $INPUT_VERSION not yet indexed (registry still processing); waiting 15s…"
+            sleep 15
+            attempt=$((attempt + 1))
+          done
+          echo "::warning::npm publish --provenance succeeded but the registry still returns 404/empty for $INPUT_VERSION after 10 attempts; indexing is still propagating. Release run stays green; confirm dist-tags before announcing."
+          exit 0

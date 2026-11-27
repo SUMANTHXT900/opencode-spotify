@@ -609,7 +609,7 @@ and spins. Time is never converted into a fabricated percentage.
 ## Update policy
 
 - **Pin the exact plugin version** in the global registration
-  (`opencode-spotify@0.6.0-beta.3`, never a range or `latest` tag). The plugin and
+  (`opencode-spotify@0.6.0`, never a range or `latest` tag). The plugin and
   the installed bridge move as a pair: a floating spec can silently pair a new
   plugin with a stale bridge (or vice versa) and produce protocol mismatches.
 - **No silent Spotify changes.** The updater never applies `spicetify apply`,
@@ -663,7 +663,7 @@ CI and release preparation use the same check as the local command:
 Set-Location plugin
 npm run verify:package
 npm run verify:package -- --keep-dir ../release-artifacts/local-candidate
-npm run verify:package -- --tarball ../release-artifacts/local-candidate/opencode-spotify-0.6.0-beta.3.tgz
+npm run verify:package -- --tarball ../release-artifacts/local-candidate/opencode-spotify-0.6.0.tgz
 ```
 
 Use the first command for ordinary verification, the second when retaining the
@@ -707,10 +707,12 @@ Push a version tag and the workflow publishes exactly what CI verified:
    rechecks both digests plus proof source/run/repository binding, performs a
    single `npm view opencode-spotify --json` read (fail closed on duplicate
    version, strict-SemVer dist-tag monotonicity preflight), publishes the exact
-   downloaded bytes with `--provenance`, verifies registry integrity and the
-   intended tag, then creates/updates the GitHub Release for the tag with the
-   verified `.tgz`/`.sha256`/`.integrity` attached (`--prerelease` for beta).
-   There is no rebuild between verification and publication.
+   downloaded bytes with `--provenance`, immediately creates/updates the GitHub
+   Release for the tag with the verified `.tgz`/`.sha256`/`.integrity` attached
+   (`--prerelease` for beta), and only then verifies registry integrity and the
+   intended tag with poll-with-backoff (a hash mismatch fails closed; persistent
+   404/empty from slow CDN indexing warns but stays green, since `npm publish`
+   already succeeded). There is no rebuild between verification and publication.
 
 Run the developer physical QA in [RELEASE_QA.md](RELEASE_QA.md) against the
 tagged commit (or the release-candidate tarball from the tag run) before

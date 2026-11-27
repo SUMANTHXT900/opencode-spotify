@@ -5,12 +5,10 @@ Windows-only project. Keep changes reviewable and avoid unrelated work.
 ## User install vs dev setup
 
 To **use** the plugin, install the published package — do not clone the repo.
-(Until `0.6.0-beta.3` is published, use the local-tarball path in
-[docs/USER_GUIDE.md](docs/USER_GUIDE.md#install-walkthrough) instead of `npx`.)
 
 ```powershell
-opencode plugin add opencode-spotify@0.6.0-beta.3
-npx opencode-spotify@0.6.0-beta.3 setup
+opencode plugin add opencode-spotify
+npx opencode-spotify setup
 ```
 
 See the [README](README.md) and [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
