@@ -296,6 +296,56 @@ test("applyBridge creates a missing backup first and retries backup errors once"
   }
 });
 
+test("applyBridge progress is optional and a throwing sink never breaks apply (B06)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-progress-sink-"));
+  try {
+    const { appdata, local } = await makeDirs(root);
+    const makeSinkRuntime = () =>
+      createFakeRuntime(root, {
+        env: { APPDATA: appdata, LOCALAPPDATA: local },
+        which: {},
+        run: (file, args) => {
+          assert.equal(file, "C:\\sp.exe");
+          assert.ok(["backup", "apply"].includes(args.join(" ")));
+          return { code: 0, stdout: "ok", stderr: "" };
+        },
+      });
+
+    // No progress sink at all: the mutation still completes backup-first.
+    const plain = makeSinkRuntime();
+    assert.equal((await applyBridge(plain, { spicetifyPath: "C:\\sp.exe" })).code, 0);
+    assert.deepEqual(plain.calls.map((call) => call.args.join(" ")), ["backup", "apply"]);
+
+    // A throwing sink never aborts the mutation; every line is still offered.
+    const guarded = makeSinkRuntime();
+    let delivered = 0;
+    const result = await applyBridge(guarded, {
+      spicetifyPath: "C:\\sp.exe",
+      onProgress: () => {
+        delivered++;
+        throw new Error("sink exploded");
+      },
+    });
+    assert.equal(result.code, 0, "a broken progress sink must not abort the mutation");
+    assert.equal(delivered, 4, "every line is still offered to the sink");
+    assert.deepEqual(
+      guarded.calls.map((call) => call.args.join(" ")),
+      ["backup", "apply"],
+      "backup-first flow still completes",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("B06/F5 removal is restore-only: it never routes through apply or creates a backup", () => {
+  const uninstall = readFileSync(new URL("../src/cli/uninstall.ts", import.meta.url), "utf8");
+  assert.ok(!/\bapplyBridge\b/.test(uninstall), "uninstall never calls applyBridge (which may create a backup)");
+  assert.ok(!/\bbackupSpicetify\b/.test(uninstall), "uninstall never calls backupSpicetify");
+  assert.ok(!/\["backup"\]/.test(uninstall), "uninstall never runs `spicetify backup`");
+  assert.match(uninstall, /\["restore"\]/, "removal uses the protected restore step");
+});
+
 test("removeCredentials only deletes opencode-spotify and refuses symlink", async () => {
   const root = await mkdtemp(join(tmpdir(), "bridge-creds-"));
   try {

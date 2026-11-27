@@ -7,6 +7,9 @@ export const BRIDGE_PORT = 18765
 /** Upstream repository used for release discovery (stable channel only). */
 export const SPICETIFY_REPO = "spicetify/cli"
 
+/** Upstream Marketplace repository used for deterministic post-install setup. */
+export const SPICETIFY_MARKETPLACE_REPO = "spicetify/marketplace"
+
 /** Official Spicetify installer script pin (A02 evidence, 2026-11-26). */
 export const OFFICIAL_INSTALLER_URL =
   "https://raw.githubusercontent.com/spicetify/cli/f4a824fbbe07233adeab889328e6fefdc274660b/install.ps1"

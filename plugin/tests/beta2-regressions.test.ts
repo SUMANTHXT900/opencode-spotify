@@ -10,6 +10,8 @@ import {
 } from "../src/cli/opencode.ts"
 import { OPERATION_TIMEOUTS } from "../src/cli/runtime.ts"
 import { resolveChannelLabels } from "../src/cli/status.ts"
+import { runStatus, type StatusReport } from "../src/cli/status.ts"
+import { runDoctor } from "../src/cli/doctor.ts"
 import { applyBridge } from "../src/cli/bridge.ts"
 import { shortConnectionLabel, connectionHint } from "../src/services/state.ts"
 import { executePlan, planExitCode } from "../src/cli/plan.ts"
@@ -248,7 +250,7 @@ test("packed artifact carries its own TUI runtime deps and the bridge unprovisio
   const { readFileSync } = await import("node:fs")
   const { fileURLToPath } = await import("node:url")
   const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"))
-  assert.equal(manifest.version, "0.6.0-beta.3")
+  assert.match(String(manifest.version), /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/, "package.json version must be strict semver")
   // Policy-based (no hard-coded renderer versions) so scratch candidates
   // with exact newer pins pass: exact shape, matching core/solid pair, hard
   // deps only. The beta.2 failure modes (optional peer, ^ range, core/solid
@@ -394,4 +396,64 @@ test("spicetify-only update synchronizes and applies the bridge", async () => {
   assert.ok(commands.some((command) => command.includes("install-extension.ps1")), "bridge synchronized")
   assert.ok(commands.some((command) => command === "C:\\spicetify.exe apply" || command.endsWith(" apply")), "apply ran after sync")
   assert.ok(ui.lines.join("\n").includes("synchronized and applied"))
+})
+
+// Agent-3: Marketplace diagnostics stay read-only, additive, and playback-free.
+test("marketplace diagnostics never execute, install, or claim playback", async () => {
+  const runtime = fakeRuntime()
+  const baseExists = runtime.exists.bind(runtime)
+  runtime.exists = (path: string) => (/marketplace/i.test(path) ? true : baseExists(path))
+  const baseIsFile = runtime.isFile.bind(runtime)
+  runtime.isFile = (path: string) => (/marketplace/i.test(path) ? true : baseIsFile(path))
+  const baseRead = runtime.readText.bind(runtime)
+  const configPath = fakeDetection(runtime).spicetify.configPath
+  runtime.readText = (path: string) =>
+    (path === configPath ? "[AdditionalOptions]\ncustom_apps = marketplace\n" : baseRead(path))
+
+  const statusUi = fakeUi()
+  const statusCtx = context(runtime, statusUi, fakePrompt(), { command: "status", json: true })
+  statusCtx.detection = fakeDetection(runtime)
+  assert.equal(await runStatus(statusCtx), 0)
+  const status = statusUi.jsonValue as StatusReport
+  assert.deepEqual(status.marketplace, { installed: true, registered: true })
+  assert.deepEqual(runtime.calls, [], "status must not execute commands for Marketplace")
+
+  const doctorUi = fakeUi()
+  const doctorCtx = context(runtime, doctorUi, fakePrompt(), { command: "doctor", json: true })
+  doctorCtx.detection = fakeDetection(runtime)
+  assert.equal(await runDoctor(doctorCtx), 0)
+  const report = doctorUi.jsonValue as { checks: Array<{ id: string; status: string; message: string; fix?: string }>; environment: { marketplace: { installed: boolean; registered: boolean } } }
+  assert.deepEqual(report.environment.marketplace, { installed: true, registered: true })
+  const marketplace = report.checks.find((check) => check.id === "marketplace")
+  assert.ok(marketplace, "marketplace check missing")
+  assert.equal(marketplace?.status, "info")
+  for (const check of report.checks) {
+    assert.doesNotMatch(check.message, /playback (?:was|is|has been) verified/i)
+  }
+  const guidance = report.checks.map((check) => `${check.message} ${check.fix ?? ""}`).join("\n")
+  assert.doesNotMatch(guidance, /winget\s+(?:install|upgrade)/i, "diagnostics must not instruct Winget use")
+})
+
+// Agent-3 regression: the retired "method that owns this copy" wording is gone;
+// every Spicetify update pointer is the official installer.
+test("retired owner-method wording never appears in diagnostics", async () => {
+  const runtime = fakeRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "doctor", json: true })
+  const detection = fakeDetection(runtime)
+  detection.spicetify = { ...detection.spicetify, owner: "scoop", version: "1.0.0" }
+  ctx.detection = detection
+  assert.equal(await runDoctor(ctx), 0)
+  const report = ui.jsonValue as { checks: Array<{ id: string; status: string; message: string; fix?: string }> }
+  const version = report.checks.find((check) => check.id === "spicetify-version")
+  assert.equal(version?.status, "warn")
+  assert.match(version?.fix ?? "", /opencode-spotify update.*official installer/)
+  const manager = report.checks.find((check) => check.id === "spicetify-manager")
+  assert.ok(manager, "spicetify-manager migration note missing for a scoop copy")
+  assert.match(manager?.fix ?? "", /opencode-spotify update.*official installer/)
+  const guidance = report.checks.map((check) => `${check.message} ${check.fix ?? ""}`).join("\n")
+  assert.doesNotMatch(guidance, /method that owns this copy/i)
+  assert.doesNotMatch(guidance, /do not mix package managers/i)
+  assert.doesNotMatch(guidance, /scoop update/i)
+  assert.doesNotMatch(guidance, /choco upgrade/i)
 })

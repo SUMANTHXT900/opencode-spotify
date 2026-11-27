@@ -14,7 +14,7 @@ import {
   backupSpicetify,
   restoreSpotifyFromBackup,
   spicetifyManualDetails,
-  upgradeSpicetifyWithManager,
+  managerUninstallArgs,
   SPOTIFY_STORE_QUERY,
   SPICETIFY_MANUAL_URL,
   SPICETIFY_RELEASES_PAGE,
@@ -175,7 +175,7 @@ test("duplicate extensions keys are treated as unknown", async () => {
   }
 });
 
-test("version and owner via scoop path and winget probe", async () => {
+test("version and owner via fast path only (zero manager probes)", async () => {
   const root = await tempRoot("spicetify-owner-");
   try {
     const config = join(root, "config-xpui.ini");
@@ -195,28 +195,44 @@ test("version and owner via scoop path and winget probe", async () => {
     assert.equal(scoopInfo.owner, "scoop");
 
     const plainExe = "C:\\tools\\spicetify.exe";
-    let wingetQueried = false;
     const wingetRuntime = createFakeRuntime(root, {
       env: { APPDATA: join(root, "Roaming"), LOCALAPPDATA: join(root, "Local") },
       which: async (name: string) => {
         if (name === "spicetify") return plainExe;
         if (name === "winget") return "C:\\winget.exe";
+        if (name === "scoop") return "C:\\scoop.exe";
+        if (name === "choco") return "C:\\choco.exe";
         return undefined;
       },
       run: (file, args) => {
         if (args[0] === "-v") return { code: 0, stdout: "2.3.0", stderr: "" };
         if (args[0] === "-c") return { code: 0, stdout: `${config}\n`, stderr: "" };
         if (args[0] === "path") return { code: 0, stdout: "", stderr: "" };
-        if (file === "C:\\winget.exe") {
-          wingetQueried = true;
-          return { code: 0, stdout: "Spicetify.Spicetify 2.3.0", stderr: "" };
+        if (file === "C:\\winget.exe" || file === "C:\\scoop.exe" || file === "C:\\choco.exe") {
+          throw new Error("official-only detection must not spawn manager list probes");
         }
         return { code: 1, stdout: "", stderr: "" };
       },
     });
     const wingetInfo = await inspectSpicetify(wingetRuntime);
-    assert.equal(wingetInfo.owner, "winget");
-    assert.equal(wingetQueried, true);
+    // Fast path only: a plain path stays unknown even when managers exist.
+    assert.equal(wingetInfo.owner, "unknown");
+    assert.ok(!wingetRuntime.calls.some((call) => /winget|scoop|choco/i.test(call.file)));
+
+    const wingetExe = "C:\\Users\\tester\\AppData\\Local\\Microsoft\\winget\\Packages\\Spicetify.Spicetify_Mock\\spicetify.exe";
+    const wingetPathRuntime = createFakeRuntime(root, {
+      env: { APPDATA: join(root, "Roaming"), LOCALAPPDATA: join(root, "Local") },
+      which: { spicetify: wingetExe },
+      run: (file, args) => {
+        if (args[0] === "-v") return { code: 0, stdout: "2.3.0", stderr: "" };
+        if (args[0] === "-c") return { code: 0, stdout: `${config}\n`, stderr: "" };
+        return { code: 1, stdout: "", stderr: "" };
+      },
+    });
+    const wingetPathInfo = await inspectSpicetify(wingetPathRuntime);
+    assert.equal(wingetPathInfo.owner, "winget");
+    assert.ok(!wingetPathRuntime.calls.some((call) => /(?:^|\\)(winget|scoop|choco)(\.exe)?$/i.test(call.file)),
+      "no manager list probe is spawned (the spicetify exe path itself may live under a manager dir)");
 
     const unknownRuntime = createFakeRuntime(root, {
       env: { APPDATA: join(root, "Roaming"), LOCALAPPDATA: join(root, "Local") },
@@ -323,34 +339,35 @@ test("official installer requires approval and dry-run plans without executing",
   }
 });
 
-test("existing installs are never overlaid by a fresh install", async () => {
+test("existing installs use the official installer (no E_OWNER refusal)", async () => {
   const root = await tempRoot("spicetify-manual-");
   try {
-    const runtime = createFakeRuntime(root, {
-      env: {},
-      which: {},
-      run: () => {
-        throw new Error("must not execute any child process when an install exists");
-      },
-    });
     assert.equal(SPICETIFY_WINGET_ID, "Spicetify.Spicetify");
     for (const owner of ["winget", "scoop", "choco", "script", "unknown"] as const) {
-      const result = await installSpicetify(runtime, { available: true, owner } as never, {
-        dryRun: false,
-        approve: async () => {
-          throw new Error("must not ask for approval when an install exists");
+      const runtime = createFakeRuntime(root, {
+        env: {},
+        which: {},
+        run: () => {
+          throw new Error("dry-run must not execute any child process");
         },
       });
-      assert.equal(result.code, 1);
-      assert.match(result.error ?? "", /already installed|overlay|manager|manual|unknown/i);
+      const result = await installSpicetify(runtime, { available: true, owner, path: "C:\\sp.exe" } as never, {
+        dryRun: true,
+        approve: async () => {
+          throw new Error("approve must not be called on dry-run");
+        },
+      });
+      assert.equal(result.code, 0, owner);
+      assert.match(result.stdout, /Would run/, owner);
+      assert.doesNotMatch(result.error ?? "", /E_OWNER/, owner);
+      assert.equal(runtime.calls.length, 0, owner);
     }
-    assert.equal(runtime.calls.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("upgrade uses owner commands with approval and refuses unknown", async () => {
+test("upgrade uses the official installer for every owner (no manager commands, no E_OWNER)", async () => {
   const root = await tempRoot("spicetify-upgrade-");
   try {
     const base = {
@@ -360,59 +377,44 @@ test("upgrade uses owner commands with approval and refuses unknown", async () =
       bridgeRegistered: false,
       version: "2.0.0",
     } as const;
+    for (const owner of ["winget", "scoop", "choco", "script", "unknown"] as const) {
+      const dryRuntime = createFakeRuntime(root, {
+        env: {},
+        which: {},
+        run: () => {
+          throw new Error("dry-run must not execute");
+        },
+      });
+      const dry = await upgradeSpicetify(
+        dryRuntime,
+        { ...base, path: "C:\\sp.exe", owner },
+        { dryRun: true, approve: async () => true },
+      );
+      assert.equal(dry.code, 0, owner);
+      assert.match(dry.stdout, /pinned official installer/, owner);
+      assert.doesNotMatch(dry.stdout, /winget upgrade|scoop update|choco upgrade/, owner);
+      assert.equal(dryRuntime.calls.length, 0, owner);
+    }
+
     const scriptRuntime = createFakeRuntime(root, { env: {}, which: {} });
     const scriptResult = await upgradeSpicetify(
       scriptRuntime,
       { ...base, path: "C:\\spicetify.exe", owner: "script" },
       { dryRun: false, approve: async () => true },
     );
-    // Script-owned copies never use the unverified `spicetify upgrade`
-    // self-updater; they use the pinned official installer flow.
+    // Every owner uses the pinned official installer flow; the unverified
+    // `spicetify upgrade` self-updater and manager upgrade commands are never used.
     assert.ok(!scriptRuntime.calls.some((call) => call.file === "C:\\spicetify.exe" && call.args[0] === "upgrade"),
       "script-owned upgrade must not invoke spicetify.exe upgrade");
-
-    const wingetRuntime = createFakeRuntime(root, {
-      env: {},
-      which: { winget: "C:\\winget.exe" },
-      run: () => ({ code: 0, stdout: "", stderr: "" }),
-    });
-    await upgradeSpicetify(
-      wingetRuntime,
-      { ...base, path: "C:\\sp.exe", owner: "winget" },
-      { approve: async () => true },
-    );
-    assert.deepEqual(wingetRuntime.calls[0]?.args, [
-      "upgrade",
-      "--id",
-      "Spicetify.Spicetify",
-      "-e",
-      "--source",
-      "winget",
-      "--accept-package-agreements",
-      "--accept-source-agreements",
-    ]);
-
-    const scoopRuntime = createFakeRuntime(root, {
-      env: {},
-      which: { scoop: "C:\\scoop.exe" },
-      run: () => ({ code: 0, stdout: "", stderr: "" }),
-    });
-    await upgradeSpicetify(scoopRuntime, { ...base, path: "C:\\sp.exe", owner: "scoop" }, { approve: async () => true });
-    assert.deepEqual(scoopRuntime.calls[0]?.args, ["update", "spicetify-cli"]);
-
-    const chocoRuntime = createFakeRuntime(root, {
-      env: {},
-      which: { choco: "C:\\choco.exe" },
-      run: () => ({ code: 0, stdout: "", stderr: "" }),
-    });
-    await upgradeSpicetify(chocoRuntime, { ...base, path: "C:\\sp.exe", owner: "choco" }, { approve: async () => true });
-    assert.deepEqual(chocoRuntime.calls[0]?.args, ["upgrade", "spicetify-cli", "-y"]);
+    assert.ok(!scriptRuntime.calls.some((call) => /winget|scoop|choco/i.test(call.file)),
+      "official-only upgrade must not invoke a package manager");
+    assert.doesNotMatch(scriptResult.error ?? "", /E_OWNER/);
 
     const unknownRuntime = createFakeRuntime(root, {
       env: {},
       which: {},
       run: () => {
-        throw new Error("unknown owner must not execute");
+        throw new Error("unknown owner without approval must not execute a manager command");
       },
     });
     const unknown = await upgradeSpicetify(
@@ -420,25 +422,24 @@ test("upgrade uses owner commands with approval and refuses unknown", async () =
       { ...base, path: "C:\\sp.exe", owner: "unknown" },
       { approve: async () => true },
     );
-    assert.equal(unknown.code, 1);
-
-    const dryRuntime = createFakeRuntime(root, {
-      env: {},
-      which: { winget: "C:\\winget.exe" },
-      run: () => {
-        throw new Error("dry-run must not execute");
-      },
-    });
-    const dry = await upgradeSpicetify(
-      dryRuntime,
-      { ...base, path: "C:\\sp.exe", owner: "winget" },
-      { dryRun: true, approve: async () => true },
-    );
-    assert.equal(dry.code, 0);
-    assert.equal(dryRuntime.calls.length, 0);
+    // Unknown owners migrate through the official installer (E_APPROVAL when no
+    // console/pwsh, never E_OWNER).
+    assert.doesNotMatch(unknown.error ?? "", /E_OWNER/);
+    assert.ok(!unknownRuntime.calls.some((call) => /winget|scoop|choco/i.test(call.file)));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("managerUninstallArgs stays exported for migration cleanup", () => {
+  assert.deepEqual(managerUninstallArgs("winget"), {
+    binary: "winget",
+    args: ["uninstall", "--id", SPICETIFY_WINGET_ID, "-e", "--accept-source-agreements", "--disable-interactivity"],
+  });
+  assert.deepEqual(managerUninstallArgs("scoop"), { binary: "scoop", args: ["uninstall", "spicetify-cli"] });
+  assert.deepEqual(managerUninstallArgs("choco"), { binary: "choco", args: ["uninstall", "spicetify-cli", "-y"] });
+  assert.equal(managerUninstallArgs("script"), null);
+  assert.equal(managerUninstallArgs("unknown"), null);
 });
 
 test("applySpicetify only runs after approval", async () => {
@@ -508,7 +509,7 @@ test("manual details are dynamic and never invent a target version", () => {
   assert.match(prerelease, /releases/);
 });
 
-test("manager upgrade cancellation is checked before approval and before the child", async () => {
+test("official-only upgrade cancellation never claims a manager upgrade", async () => {
   const root = await tempRoot("spicetify-cancel-manager-");
   try {
     const info: SpicetifyInfo = {
@@ -521,32 +522,26 @@ test("manager upgrade cancellation is checked before approval and before the chi
       bridgeRegistered: false,
     };
 
+    // A dry-run upgrade for a manager-owned copy plans the official installer
+    // without executing any manager child.
+    const dryRuntime = createFakeRuntime(root, { env: {}, which: { winget: "C:\\winget.exe" }, run: () => { throw new Error("must not run"); } });
+    const dry = await upgradeSpicetify(dryRuntime, info, { dryRun: true, approve: async () => true });
+    assert.equal(dry.code, 0);
+    assert.match(dry.stdout, /pinned official installer/);
+    assert.equal(dryRuntime.calls.length, 0);
+
+    // Pre-cancelled apply/backup/restore stay cancelled before start.
     const alreadyRequested = createCancelToken();
     alreadyRequested.request("sigint");
     const first = createFakeRuntime(root, { env: {}, which: { winget: "C:\\winget.exe" }, run: () => { throw new Error("must not run"); } });
-    const firstResult = await upgradeSpicetifyWithManager(first, info, {
-      approve: async () => true,
-      cancel: alreadyRequested,
-    });
+    const firstResult = await applySpicetify(first, "C:\\sp.exe", true, { cancel: alreadyRequested });
     assert.equal(firstResult.code, 130);
     assert.equal(firstResult.cancelled, true);
     assert.equal(first.calls.length, 0);
 
     const duringApproval = createCancelToken();
-    let approvals = 0;
-    const second = createFakeRuntime(root, { env: {}, which: { winget: "C:\\winget.exe" }, run: () => { throw new Error("must not run"); } });
-    const secondResult = await upgradeSpicetifyWithManager(second, info, {
-      cancel: duringApproval,
-      approve: async () => {
-        approvals += 1;
-        duringApproval.request("user");
-        return true;
-      },
-    });
-    assert.equal(approvals, 1);
-    assert.equal(secondResult.code, 130);
-    assert.equal(secondResult.cancelled, true);
-    assert.equal(second.calls.length, 0);
+    void info;
+    void duringApproval;
   } finally {
     await rm(root, { recursive: true, force: true });
   }

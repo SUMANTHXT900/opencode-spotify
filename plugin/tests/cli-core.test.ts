@@ -1,6 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { parseArgs, helpText } from "../src/cli/args.ts"
+import { readMarketplaceStatus } from "../src/cli/status.ts"
 import { BRIDGE_HANDSHAKE, BRIDGE_PORT, BRIDGE_PROTOCOL, MIN_OPENCODE, MIN_SPICETIFY, compareVersions, isAtLeast, isFloatingSpec } from "../src/cli/compat.ts"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
@@ -350,4 +351,86 @@ test("npm lookups stop at a cancellation boundary", async () => {
   } finally {
     stub.restore()
   }
+})
+
+// ---------------------------------------------------------------------------
+// Agent-3: Marketplace observation is synchronous, read-only, and conservative.
+// ---------------------------------------------------------------------------
+
+function marketplaceRuntime(exists: (path: string) => boolean, text: string | Error | null): Runtime {
+  const wrapped = runtimeWith(async () => ({ code: 0, stdout: "", stderr: "" }))
+  return {
+    ...wrapped,
+    exists,
+    isFile: (path: string) => {
+      try {
+        return exists(path)
+      } catch {
+        return false
+      }
+    },
+    readText: () => {
+      if (text instanceof Error) throw text
+      return text ?? ""
+    },
+  }
+}
+
+test("marketplace observation reads only exists/isFile/readText and keeps the contract shape", () => {
+  const config = "[AdditionalOptions]\r\ncustom_apps = foo|Marketplace|bar\r\n"
+  const runtime = marketplaceRuntime(() => true, config)
+  const status = readMarketplaceStatus(runtime, { configPath: "C:\\cfg\\config-xpui.ini" })
+  assert.deepEqual(status, { installed: true, registered: true })
+  // The report keeps exactly the two contract fields: extras (dir,
+  // configPath) can carry user paths and stay out of `--json`.
+  assert.deepEqual(Object.keys(status).sort(), ["installed", "registered"])
+})
+
+test("marketplace observation tolerates hostile runtimes without throwing", () => {
+  const explodingExists = marketplaceRuntime(
+    () => { throw new Error("denied") },
+    new Error("denied"),
+  )
+  assert.deepEqual(
+    readMarketplaceStatus(explodingExists, { configPath: "C:\\cfg\\config-xpui.ini" }),
+    { installed: false, registered: false },
+  )
+  assert.deepEqual(readMarketplaceStatus(explodingExists, null), { installed: false, registered: false })
+  assert.deepEqual(readMarketplaceStatus(explodingExists, undefined), { installed: false, registered: false })
+})
+
+test("marketplace registration matches the exact custom_apps token", () => {
+  const configPath = "C:\\cfg\\config-xpui.ini"
+  const cases: Array<[string, string, boolean]> = [
+    ["custom_apps key", "[AdditionalOptions]\ncustom_apps = marketplace\n", true],
+    ["case-insensitive token", "custom_apps = MARKETPLACE\n", true],
+    ["pipe list", "custom_apps = foo|marketplace|bar\n", true],
+    ["comma list", "custom_apps = foo, marketplace\n", true],
+    ["extensions key ignored", "[AdditionalOptions]\nextensions = marketplace\n", false],
+    ["comment line", "[AdditionalOptions]\n# custom_apps = marketplace\n", false],
+    ["substring is not a token", "custom_apps = marketplacestore\n", false],
+    ["bare prose", "please install marketplace soon\n", false],
+    ["empty config", "", false],
+  ]
+  for (const [label, text, expected] of cases) {
+    const runtime = marketplaceRuntime(() => true, text)
+    assert.equal(readMarketplaceStatus(runtime, { configPath }).registered, expected, label)
+  }
+})
+
+test("marketplace observation never executes a child process", () => {
+  let ran = false
+  const base = runtimeWith(async () => {
+    ran = true
+    return { code: 0, stdout: "", stderr: "" }
+  })
+  const runtime: Runtime = {
+    ...base,
+    exists: () => true,
+    isFile: () => true,
+    readText: () => "[AdditionalOptions]\ncustom_apps = marketplace\n",
+  }
+  const status = readMarketplaceStatus(runtime, { configPath: "C:\\cfg\\config-xpui.ini" })
+  assert.deepEqual(status, { installed: true, registered: true })
+  assert.equal(ran, false, "observation must not execute anything")
 })

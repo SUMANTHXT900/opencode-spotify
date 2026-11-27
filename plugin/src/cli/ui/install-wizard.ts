@@ -228,9 +228,11 @@ export function renderSelectionScreen(ui: Ui, input: InstallWizardInput): void {
   ui.kv("Latest detected", displayValue(input.latestVersion, "unknown (offline or lookup failed)"))
   ui.kv("Installer target", target ?? "unknown (official installer refused)")
   ui.kv("Official installer", `revision ${pin.revision}, ${formatInstallerSize(pin.sizeBytes)}, script SHA-256 ${pin.sha256}`)
+  ui.kv("Marketplace", "installed by default (skip with --no-marketplace)")
   if (!target) {
     ui.warn("No verified Spicetify target version is known; the official installer will not run. Install manually or retry when the release lookup succeeds.")
   }
+  ui.line("  Spicetify installs via the pinned official installer; the Marketplace installs by default (opt out with --no-marketplace).")
   ui.line("  The official installer script is pinned and digest-checked; manual installation uses the published instructions.")
   ui.line("  Either path leaves plugin registration, bridge setup, and `spicetify apply` to later, separately approved steps.")
 }
@@ -268,6 +270,8 @@ export function renderOfficialInstallerExplanation(
   ui.kv("Target version", target ?? "unknown (not verified; official install refused)")
   ui.kv("Installed Spicetify", displayValue(input.installedVersion, "not detected"))
   ui.kv("Latest detected", displayValue(input.latestVersion, "unknown (offline or lookup failed)"))
+  ui.kv("Marketplace", "installed by default (skip with --no-marketplace)")
+  ui.line("  Spicetify installs via the pinned official installer; the Marketplace installs by default.")
   ui.line("  What it does:")
   for (const effect of effects) ui.bullet(effect)
   // Crisp default: the full non-effects wall is --verbose only. Runtime

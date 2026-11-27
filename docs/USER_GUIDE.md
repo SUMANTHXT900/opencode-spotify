@@ -36,13 +36,9 @@ Spotify playback, synchronized lyrics, and album artwork inside the OpenCode ter
 runs on Node and the TUI runs under the OpenCode host's Bun. Nothing else needs
 manual installing — no OpenTUI, Solid, React, or Ink setup.
 
-> **Beta status.** `0.6.0-beta.3` is not published yet (npm `latest` points at the
-> older prerelease `0.6.0-beta.1`). Until it is published, use the local-tarball
-> path in step 1b below; the `npx` path in step 1a works after publication.
-
 ## Install walkthrough
 
-### 1a. After publication (registry path)
+### 1a. Registry path
 
 Run `setup` — it performs the global registration itself as one of its plan
 steps, so a single command installs:
@@ -55,10 +51,10 @@ Pin the exact version so the plugin and the installed bridge stay coordinated. N
 pair the global entry with a duplicate local path entry, and never float the version.
 One entry loads both halves — the server owner and the TUI.
 
-### 1b. Before publication (local-tarball path)
+### 1b. Local-tarball path (release QA / offline)
 
-Install the tarball by local path into an isolated prefix, then register the
-absolute installed path:
+To verify a release tarball byte-for-byte, install it by local path into an
+isolated prefix, then register the absolute installed path:
 
 ```powershell
 cmd /d /s /c "call npm install --global --prefix `"<isolated-prefix>`" `"<path>\opencode-spotify-0.6.0-beta.3.tgz`""
@@ -72,14 +68,14 @@ execution-policy problems with `npm.ps1`.
 
 `setup` is the default command: it detects (read-only), shows a numbered plan with
 real step descriptions, asks approval, then executes with backups first and verifies
-afterwards. `--dry-run` shows the plan and changes nothing. After publication:
+afterwards. `--dry-run` shows the plan and changes nothing. From the registry:
 
 ```powershell
 npx opencode-spotify@0.6.0-beta.3 setup --dry-run
 npx opencode-spotify@0.6.0-beta.3 setup
 ```
 
-Before publication, run the installed tarball's CLI directly (same commands,
+From a local-tarball install, run the installed tarball's CLI directly (same commands,
 local path instead of `npx`):
 
 ```powershell
@@ -88,10 +84,12 @@ node "<isolated-prefix>\node_modules\opencode-spotify\bin\opencode-spotify.js" s
 ```
 
 The plan covers global registration, bridge files/credentials, port `18765`,
-Spicetify handling (below), and `spicetify apply` — which stays a separate consent
-even after `--yes` approves the bridge files. Re-running `setup` on an existing
-installation opens a maintenance menu (update targets only when achievable, Repair,
-Uninstall, Status + diagnostics, Continue, Exit). `--non-interactive` never prompts;
+Spicetify handling (below), the Marketplace install (below), and `spicetify
+apply` — which stays a separate consent even after `--yes` approves the bridge
+files. Re-running `setup` on an existing installation opens the maintenance
+menu — Update to latest (only when an update is genuinely achievable), Repair
+installation, Uninstall, Exit — plus a switch entry when the registration is a
+local development path. `--non-interactive` never prompts;
 it prints the explicit `update` / `repair` / `uninstall` commands instead.
 
 On an interactive TTY the installer uses an inline Ink dashboard; `--plain` /
@@ -106,10 +104,15 @@ exit 130); a second forces.
 - `--spicetify=ask` (default) asks how to handle a missing Spicetify CLI.
 - `--spicetify=auto` proceeds automatically (fresh install uses the pinned official
   installer script with the release target resolved from the latest stable GitHub
-  release at run time; existing copies are handled through their owner).
+  release at run time; every existing copy — script, Winget, Scoop, or
+  Chocolatey — is migrated through that same official installer on update, so no
+  second copy is ever installed and package managers are never mixed).
 - `--spicetify=manual` prints the pinned installer URL/hash, the resolved target,
   and the official docs; it downloads and executes nothing.
 - `--spicetify=skip` leaves Spicetify alone.
+- The Spicetify Marketplace is installed by default after the official flow
+  (deterministic installer, latest Marketplace release); pass
+  `--no-marketplace` to skip it.
 
 Apply behavior: setup prepares the bridge files first and asks separately before
 running `spicetify apply`. In non-interactive runs, `apply` additionally needs
@@ -117,19 +120,22 @@ running `spicetify apply`. In non-interactive runs, `apply` additionally needs
 
 ## Existing Spicetify handling
 
-The installer never overlays another owner's copy and never mixes package managers:
+A fresh install never overlays another owner's copy. On update, every existing
+copy is migrated through the pinned official installer — package managers are
+never mixed and no second copy is installed:
 
 | Owner | Upgrade | Removal |
 |-------|---------|---------|
 | Official script (`%LOCALAPPDATA%\spicetify`) | Pinned official installer | Validated local directory plus exact PATH entries |
-| winget | `winget` (`Spicetify.Spicetify`) | `winget uninstall --id Spicetify.Spicetify -e --accept-source-agreements --disable-interactivity` |
-| scoop / Chocolatey | That manager (`spicetify-cli`) | That manager |
+| winget | Migrated to the official installer | `winget uninstall --id Spicetify.Spicetify -e --accept-source-agreements --disable-interactivity` |
+| scoop / Chocolatey | Migrated to the official installer | That manager (`spicetify-cli`) |
 | Unknown | Refused with manual guidance | Disclosed, never deleted |
 
-Fresh installs refuse to overlay any existing copy. A script-owned copy is upgraded
-with the same pinned official installer. The Marketplace region is removed from the
-official script by a reviewed patch (no Marketplace prompt, URL, or download); see
-[MAINTAINERS.md](MAINTAINERS.md) for the trust spec.
+Fresh installs refuse to overlay any existing copy. The Marketplace region is
+removed from the official script by a reviewed patch (no Marketplace prompt,
+URL, or download there — see [MAINTAINERS.md](MAINTAINERS.md)); the adapter
+then installs the Marketplace deterministically by default (`--no-marketplace`
+opts out).
 
 ## Startup
 
@@ -149,7 +155,8 @@ credential yet. That is a concise connection-state label, not a crash — run `s
 first. Project-local config is never modified; if a project-local `opencode-spotify`
 entry shadows the global install, setup warns and leaves it alone. Keep exactly one
 registration: remove (or `-`-disable) the project-local entry and restart OpenCode,
-including any background `serve` process, to clear a `Duplicate plugin ID` state.
+including any background `serve` process (or run `opencode service restart`),
+to clear a `Duplicate plugin ID` state.
 
 ## Player
 
@@ -201,6 +208,9 @@ The installer distinguishes two labels when checking for updates:
 
 - **stable** — ordinary releases, safe for everyone.
 - **beta** — prereleases such as `0.6.0-beta.3`, for testers.
+
+Releases publish by tag: `vX.Y.Z` ships to the `latest` dist-tag, `vX.Y.Z-beta.N`
+to the `beta` dist-tag, each with its own CI verification and GitHub Release.
 
 A prerelease is never labelled stable, and a stable install never advertises or
 downgrades to an older tag. A beta install offers a newer beta or stable, whichever
@@ -258,7 +268,7 @@ npx opencode-spotify@0.6.0-beta.3 uninstall
 | Symptom | Fix |
 |---------|-----|
 | Bridge "Config error" | Run `setup`; expected with no Spicetify install/credential |
-| `Duplicate plugin ID` | Keep one registration; remove or `-`-disable the project-local entry, restart OpenCode incl. background processes |
+| `Duplicate plugin ID` | Keep one registration; remove or `-`-disable the project-local entry, restart OpenCode incl. background processes (or `opencode service restart`) |
 | Lyrics unavailable for a track | Track has no synced payload; try Refresh in Settings, or enable LRCLIB |
 | Playback action disabled | Capability-gated by the Spotify client; the reason is shown |
 | Something broke after a Spotify update | Private Spicetify/Spotify APIs can break; run `doctor`, then `repair` |

@@ -30,7 +30,6 @@ import type {
   InstallerStore,
   Logger,
   ProgressEvent,
-  PromptRequest,
   Ui,
 } from "../src/cli/types.ts"
 import { applyInkKey, createInkApp } from "../src/cli/ui/ink.ts"
@@ -229,10 +228,6 @@ function InkRows({ rows }: { rows: readonly InkRow[] }): ReactElement {
       row.text.length > 0 ? row.text : " ",
     )),
   )
-}
-
-function stringRows(lines: readonly string[]): InkRow[] {
-  return lines.map((text) => ({ kind: "detail", tone: "default", text }))
 }
 
 function renderRows(rows: readonly InkRow[]): ReturnType<typeof render> {

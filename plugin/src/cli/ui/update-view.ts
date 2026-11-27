@@ -133,10 +133,10 @@ export function createUpdateViewModel(input: UpdateViewModelInput): UpdateViewMo
 
 export type SpicetifyOwnerCategory = "official" | "manager" | "unknown"
 
-export function spicetifyOwnerCategory(owner: InstallOwner): SpicetifyOwnerCategory {
-  if (owner === "script") return "official"
-  if (owner === "winget" || owner === "scoop" || owner === "choco") return "manager"
-  return "unknown"
+export function spicetifyOwnerCategory(_owner: InstallOwner): SpicetifyOwnerCategory {
+  // Official-installer-only policy: every owner (including legacy manager
+  // copies and unknown) migrates through the pinned official installer.
+  return "official"
 }
 
 export function spicetifyOwnerLabel(owner: InstallOwner): string {
@@ -160,90 +160,26 @@ export interface SpicetifyGuidance {
 }
 
 /**
- * Owner-specific upgrade guidance. Official installs stay on the official
- * installer (or the verified release flow); manager installs use only their
- * own manager; unknown owners get no command and are never auto-upgraded.
+ * Official-installer-only upgrade guidance. Every owner (including legacy
+ * manager copies and unknown) migrates through the pinned official installer
+ * to the latest stable release; manager commands are never shown and no
+ * owner is refused.
  */
 export function spicetifyUpdateGuidance(
   owner: InstallOwner,
-  options: { verifiedInstall?: boolean } = {},
+  _options: { verifiedInstall?: boolean } = {},
 ): SpicetifyGuidance {
-  const category = spicetifyOwnerCategory(owner)
-  if (category === "official") {
-    if (options.verifiedInstall) {
-      return {
-        owner,
-        category,
-        method: "verified GitHub release zip",
-        command: null,
-        lines: [
-          "This Spicetify came from a verified GitHub release zip.",
-          "The unverified `spicetify-cli upgrade` self-updater is refused for this installation.",
-          "Re-run setup and choose the verified release option, or update manually with SHA-256 verification.",
-          `Docs: ${SPICETIFY_DOCS_URL}`,
-        ],
-        warning: "Automatic Spicetify upgrade requires the verified flow.",
-      }
-    }
-    return {
-      owner,
-      category,
-      method: "official installer (spicetify-cli upgrade)",
-      command: "spicetify-cli upgrade",
-      lines: [
-        "This installation is owned by the official Spicetify installer.",
-        "Keep using the official installer; do not also run winget, Scoop, or Chocolatey against it.",
-        `Docs: ${SPICETIFY_DOCS_URL}`,
-      ],
-    }
-  }
-  if (owner === "winget") {
-    return {
-      owner,
-      category,
-      method: `winget (${SPICETIFY_WINGET_ID})`,
-      command: `winget upgrade --id ${SPICETIFY_WINGET_ID} -e --source winget --accept-package-agreements --accept-source-agreements`,
-      lines: [
-        "This installation is owned by winget.",
-        "Only winget should update it; do not mix package managers.",
-      ],
-    }
-  }
-  if (owner === "scoop") {
-    return {
-      owner,
-      category,
-      method: "Scoop (spicetify-cli)",
-      command: "scoop update spicetify-cli",
-      lines: [
-        "This installation is owned by Scoop.",
-        "Only Scoop should update it; do not mix package managers.",
-      ],
-    }
-  }
-  if (owner === "choco") {
-    return {
-      owner,
-      category,
-      method: "Chocolatey (spicetify-cli)",
-      command: "choco upgrade spicetify-cli -y",
-      lines: [
-        "This installation is owned by Chocolatey.",
-        "Only Chocolatey should update it; do not mix package managers.",
-      ],
-    }
-  }
   return {
     owner,
-    category: "unknown",
-    method: "unknown install owner",
+    category: "official",
+    method: "official installer (legacy copies migrate; no second copy)",
     command: null,
     lines: [
-      "Identify how Spicetify was installed before updating it.",
+      "Spicetify installs and updates via the pinned official installer to the latest stable release.",
+      "Legacy manager copies (winget/Scoop/Chocolatey) migrate to the official pipeline; no second copy is installed and managers are not mixed.",
+      "The Spicetify Marketplace installs by default (skip with --no-marketplace).",
       `Docs: ${SPICETIFY_DOCS_URL}`,
-      "Never run two package managers against the same installation.",
     ],
-    warning: "The Spicetify installation owner could not be determined; no automatic upgrade will run.",
   }
 }
 
@@ -339,9 +275,9 @@ export function renderUpdateOverview(ui: Ui, model: UpdateViewModel, options: Up
   if (model.plugin.error) ui.warn(`Plugin version check: ${model.plugin.error}`)
   if (model.spicetify.error) ui.warn(`Spicetify version check: ${model.spicetify.error}`)
   if (model.spicetify.status === "outdated") {
-    if (model.spicetify.owner === "unknown") {
-      ui.warn("The Spicetify install owner is unknown; no automatic upgrade will run.")
-    } else if (!options.allowSpicetifyUpgrade) {
+    ui.line("  Spicetify updates through the pinned official installer (legacy copies migrate; no second copy).")
+    ui.line("  The Marketplace installs by default (skip with --no-marketplace).")
+    if (!options.allowSpicetifyUpgrade) {
       ui.line("  Spicetify upgrades need a separate confirmation (or --allow-spicetify-upgrade).")
     }
   }
@@ -506,8 +442,9 @@ export interface UpdateSelectionOptions {
 }
 
 function spicetifyUpgradable(model: UpdateViewModel): boolean {
+  // Official-installer-only: every outdated copy (including unknown owners)
+  // is upgradable through the pinned official installer.
   return model.spicetify.status === "outdated" &&
-    model.spicetify.owner !== "unknown" &&
     !!(model.spicetify.target ?? model.spicetify.latest)
 }
 
@@ -515,8 +452,8 @@ function spicetifyUpgradable(model: UpdateViewModel): boolean {
  * Build the choices from backend statuses. "both" is offered whenever both
  * updates exist; when the caller has not pre-authorized Spicetify, the label
  * says so and selecting it is the interactive authorization the caller must
- * persist before invoking the backend. Unknown owners are never offered an
- * automatic upgrade.
+ * persist before invoking the backend. All owners upgrade through the
+ * official installer (legacy copies migrate; no manager commands).
  */
 export function updateSelectionChoices(
   model: UpdateViewModel,
@@ -527,14 +464,13 @@ export function updateSelectionChoices(
   const allowed = options.allowSpicetifyUpgrade === true
   const pluginTarget = `${model.plugin.installed ?? "unknown"} -> ${model.plugin.target ?? "unknown"}`
   const spicetifyTarget = `${model.spicetify.installed ?? "unknown"} -> ${model.spicetify.target ?? model.spicetify.latest ?? "unknown"}`
-  const owner = spicetifyOwnerLabel(model.spicetify.owner)
 
   const choices: UpdateChoice[] = []
   if (pluginAvailable && spicetifyAvailable) {
     const suffix = allowed ? "" : "; combined authorization required"
     choices.push({
       value: "both",
-      label: `Update OpenCode Spotify and Spicetify (${pluginTarget}; Spicetify ${spicetifyTarget} via ${owner})${suffix}`,
+      label: `Update OpenCode Spotify and Spicetify (${pluginTarget}; Spicetify ${spicetifyTarget} via official installer)${suffix}`,
     })
   }
   if (pluginAvailable) {
@@ -544,7 +480,7 @@ export function updateSelectionChoices(
     const suffix = allowed ? "" : "; separate confirmation required"
     choices.push({
       value: "spicetify",
-      label: `Update Spicetify only (${spicetifyTarget}) via ${owner}${suffix}`,
+      label: `Update Spicetify only (${spicetifyTarget}) via official installer${suffix}`,
     })
   }
   choices.push({ value: "cancel", label: "Cancel without changing anything" })
@@ -572,12 +508,11 @@ export function renderUpdateSelection(
   ui.section("Update selection")
   if (model.spicetify.status === "outdated") {
     ui.kv("Spicetify owner", spicetifyOwnerLabel(model.spicetify.owner))
+    ui.line("  Spicetify updates through the pinned official installer (legacy copies migrate; no second copy).")
     if (model.spicetify.verifiedInstall) {
       ui.line("  This Spicetify uses the verified-release flow; the unverified self-updater is not used.")
     }
-    if (model.spicetify.owner === "unknown") {
-      ui.warn("The Spicetify install owner is unknown; no automatic upgrade will run.")
-    } else if (!options.allowSpicetifyUpgrade) {
+    if (!options.allowSpicetifyUpgrade) {
       ui.line("  Spicetify upgrades need a separate confirmation (or --allow-spicetify-upgrade).")
     }
   }
@@ -759,8 +694,8 @@ export function createUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
 
   const nextSteps = [...(input.nextSteps ?? [
     input.plugin.changed
-      ? "Restart running OpenCode processes to load the updated plugin."
-      : "Restart running OpenCode processes if the bridge was re-applied.",
+      ? "Restart running OpenCode processes to load the updated plugin (or run `opencode service restart`)."
+      : "Restart running OpenCode processes if the bridge was re-applied (or run `opencode service restart`).",
     "Playback is not verified by this command.",
   ])]
   if (input.bridge.pending) {

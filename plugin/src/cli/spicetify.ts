@@ -4,14 +4,13 @@
 import { readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  MIN_SPICETIFY,
   OFFICIAL_INSTALLER_COMMIT,
   OFFICIAL_INSTALLER_SHA256,
   parseVersion,
 } from "./compat.ts";
 import { OPERATION_TIMEOUTS, sanitizeDetail } from "./runtime.ts";
 import type { CancelToken } from "./cancel.ts";
-import type { CommandResult, Logger, Runtime, SpicetifyInfo, SpotifyInfo } from "./types.ts";
+import type { CommandResult, Runtime, SpicetifyInfo, SpotifyInfo } from "./types.ts";
 
 /** Fixed Store/Appx query. This constant must never include user input. */
 export const SPOTIFY_STORE_QUERY =
@@ -88,8 +87,9 @@ function parseBridgeRegistration(text: string): boolean | "ambiguous" {
 }
 
 async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<SpicetifyInfo["owner"]> {
-  // Manager ownership requires the manager's own directory layout. A plain
-  // substring test would misclassify any profile such as C:\Users\scoop\... .
+  // Official-only engine: purely fast path-based directory classification.
+  // Zero child-process probes (no winget/scoop/choco list spawns) so
+  // inspection stays read-only, bounded and side-effect free.
   const joined = `\\${spicetifyExe.toLowerCase().split(/[\\/]+/).filter(Boolean).join("\\")}\\`;
   if (joined.includes("\\scoop\\apps\\") || joined.includes("\\scoop\\shims\\")) return "scoop";
   if (joined.includes("\\chocolatey\\bin\\") || joined.includes("\\chocolatey\\lib\\")) return "choco";
@@ -97,51 +97,11 @@ async function detectOwner(runtime: Runtime, spicetifyExe: string): Promise<Spic
     joined.includes("\\microsoft\\winget\\links\\") ||
     joined.includes("\\winget\\links\\")) return "winget";
   // A script-owned copy must sit in the canonical %LOCALAPPDATA%\spicetify
-  // directory. Other local paths (e.g. %LOCALAPPDATA%\Programs\spicetify)
-  // are not ours to upgrade or delete. Checked before the slow manager
-  // probes so a canonical script install never pays for winget/scoop/choco.
+  // directory. Other local paths are not ours to upgrade or delete.
   const canonicalScriptDir = stripTrailingSep(localAppDataDir(runtime)).toLowerCase() + "\\spicetify";
   try {
     if (stripTrailingSep(dirname(spicetifyExe)).toLowerCase() === canonicalScriptDir) return "script";
   } catch { /* unparseable path stays unknown */ }
-  // Bounded manager probes. All argv arrays, no shell strings.
-  try {
-    const winget = await runtime.which("winget");
-    if (winget) {
-      try {
-        const result = await runtime.run(
-          winget,
-          ["list", "--id", SPICETIFY_WINGET_ID, "-e"],
-          { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect },
-        );
-        if (result.code === 0 && /spicetify/i.test(result.stdout)) return "winget";
-      } catch { /* probe failure means not winget */ }
-    }
-  } catch { /* ignore */ }
-  try {
-    const scoop = await runtime.which("scoop");
-    if (scoop) {
-      try {
-        const result = await runtime.run(scoop, ["list", "spicetify-cli"], { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect });
-        if (result.code === 0 && /spicetify/i.test(result.stdout)) return "scoop";
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-  try {
-    const choco = await runtime.which("choco");
-    if (choco) {
-      try {
-        const result = await runtime.run(
-          choco,
-          ["list", "spicetify-cli", "--local-only"],
-          { timeoutMs: OPERATION_TIMEOUTS.spicetifyInspect },
-        );
-        if (result.code === 0 && /spicetify/i.test(result.stdout)) return "choco";
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-  // Keep MIN_SPICETIFY referenced so version policy stays shared.
-  void MIN_SPICETIFY;
   return "unknown";
 }
 
@@ -360,119 +320,21 @@ export async function inspectSpicetify(runtime: Runtime): Promise<SpicetifyInfo>
   };
 }
 
-function wingetUpgradeArgs(): string[] {
-  return [
-    "upgrade",
-    "--id",
-    SPICETIFY_WINGET_ID,
-    "-e",
-    "--source",
-    "winget",
-    "--accept-package-agreements",
-    "--accept-source-agreements",
-  ];
-}
-
-export interface ManagerUpgradeApproval {
-  method: "winget" | "scoop" | "choco";
-  command: string;
-  source: string;
-}
-
-export interface ManagerUpgradeOptions {
-  dryRun?: boolean;
-  approve?: (details: ManagerUpgradeApproval) => Promise<boolean>;
-  log?: Logger;
-  /** Cooperative cancellation: checked before approval and before the child starts. */
-  cancel?: CancelToken;
-}
-
 /**
- * Owner-specific upgrade for manager installs. The official installer adapter
- * dispatches here for winget/scoop/choco; those copies are never overlaid by
- * the portable installer, and `spicetify update` is never invoked.
- * Script-owned upgrades go through the official installer instead.
+ * Owner-safe uninstall command for a manager-owned Spicetify copy.
+ * Exported for pre-install migration cleanup (official flow) and reused by
+ * the uninstall flow. Pure argv arrays; never executed here.
  */
-export async function upgradeSpicetifyWithManager(
-  runtime: Runtime,
-  info: SpicetifyInfo,
-  opts: ManagerUpgradeOptions,
-): Promise<CommandResult> {
-  if (!info.available || !info.path) {
-    return { code: 1, stdout: "", stderr: "", error: "Spicetify is not installed." };
-  }
-  const owner = info.owner;
-  if (owner !== "winget" && owner !== "scoop" && owner !== "choco") {
+export function managerUninstallArgs(owner: SpicetifyInfo["owner"]): { binary: string; args: string[] } | null {
+  if (owner === "winget") {
     return {
-      code: 1,
-      stdout: "",
-      stderr: "",
-      error: `Manager upgrade only applies to winget/scoop/Chocolatey installations; this copy is ${owner === "script" ? "owned by the official installer" : `owned by ${owner}`}.`,
+      binary: "winget",
+      args: ["uninstall", "--id", SPICETIFY_WINGET_ID, "-e", "--accept-source-agreements", "--disable-interactivity"],
     };
   }
-
-  const spec = owner === "winget"
-    ? {
-        binary: "winget",
-        args: wingetUpgradeArgs(),
-        source: `winget: ${SPICETIFY_WINGET_ID}`,
-        guidance: `winget upgrade --id ${SPICETIFY_WINGET_ID} -e`,
-      }
-    : owner === "scoop"
-      ? {
-          binary: "scoop",
-          args: ["update", "spicetify-cli"],
-          source: "scoop: spicetify-cli",
-          guidance: "scoop update spicetify-cli",
-        }
-      : {
-          binary: "choco",
-          args: ["upgrade", "spicetify-cli", "-y"],
-          source: "chocolatey: spicetify-cli",
-          guidance: "choco upgrade spicetify-cli -y",
-        };
-
-  const command = `${spec.binary} ${spec.args.join(" ")}`;
-  if (opts.cancel?.requested) return cancelledResult("the Spicetify upgrade");
-  if (opts.dryRun) {
-    return { code: 0, stdout: `Would run: ${command}`, stderr: "" };
-  }
-  const file = await runtime.which(spec.binary).catch(() => undefined);
-  if (!file) {
-    return {
-      code: 1,
-      stdout: "",
-      stderr: "",
-      error: `${spec.binary} was not found on PATH; update this ${owner}-owned Spicetify manually (${spec.guidance}) or reinstall it with ${owner}.`,
-    };
-  }
-  if (!opts.approve) {
-    return {
-      code: 1,
-      stdout: "",
-      stderr: "",
-      error: "Spicetify upgrade requires explicit approval; no approval handler was provided.",
-    };
-  }
-  if (opts.cancel?.requested) return cancelledResult("the Spicetify upgrade");
-  const resolvedCommand = `${file} ${spec.args.join(" ")}`;
-  opts.log?.out(`Spicetify upgrade: ${resolvedCommand}`);
-  opts.log?.out(`Source: ${spec.source}`);
-  let approved = false;
-  try {
-    approved = await opts.approve({ method: owner, command: resolvedCommand, source: spec.source });
-  } catch {
-    approved = false;
-  }
-  if (!approved) {
-    return { code: 1, stdout: "", stderr: "", error: "Spicetify upgrade declined." };
-  }
-  // Approval input can take time; re-check before the mutation starts.
-  if (opts.cancel?.requested) return cancelledResult("the Spicetify upgrade");
-  return runtime.run(file, spec.args, {
-    timeoutMs: OPERATION_TIMEOUTS.packageInstall,
-    ...(opts.cancel ? { cancel: opts.cancel } : {}),
-  });
+  if (owner === "scoop") return { binary: "scoop", args: ["uninstall", "spicetify-cli"] };
+  if (owner === "choco") return { binary: "choco", args: ["uninstall", "spicetify-cli", "-y"] };
+  return null;
 }
 
 /**

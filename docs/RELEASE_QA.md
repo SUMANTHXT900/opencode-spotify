@@ -400,10 +400,12 @@ opencode-spotify setup --spicetify=auto
 - [ ] 120×40, 100×40, smaller heights, expanded/collapsed Context/MCP/Todo.
 - [ ] Multiple OpenCode processes attach with one authenticated owner.
 
-## 8. Post-publication QA (only after a registry version exists)
+## 8. Post-publication QA (only after the tag-triggered publish completes)
 
-Do not run this section pre-publication. Replace the version with the published
-prerelease and re-run the matrix against the registry artifact.
+Run this section only after tagging and pushing (`git tag vX.Y.Z[-beta.N] &&
+git push origin main vX.Y.Z[-beta.N]`) and the `release.yml` publish job has
+succeeded. Replace the version with the published prerelease and re-run the
+matrix against the registry artifact.
 
 ```powershell
 npx opencode-spotify@0.6.0-beta.3 setup

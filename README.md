@@ -8,12 +8,6 @@ Spotify playback, synchronized lyrics and album artwork inside your OpenCode ter
 
 An independent, MIT-licensed OpenCode plugin. Not affiliated with Spotify AB or the OpenCode project.
 
-> **Beta status.** The current version is `0.6.0-beta.3` and it is **not published yet**
-> (npm `latest` points at the older prerelease `0.6.0-beta.1`; `beta` points at
-> `0.6.0-beta.2`). Until beta.3 is published, install and verify from a local
-> tarball as described in [docs/USER_GUIDE.md](docs/USER_GUIDE.md#install-walkthrough). The player
-> itself is unchanged since V0.5.7; beta.3 adds the installer and release path.
-
 ## What you get
 
 - A pinned sidebar card in the OpenCode footer: connection header, Music / Lyrics / More
@@ -34,10 +28,14 @@ An independent, MIT-licensed OpenCode plugin. Not affiliated with Spotify AB or 
 
 Prerequisites: **Windows**, **Node.js ≥ 22.18.0**, **Bun ≥ 1.3.14** (the OpenCode-hosted
 TUI runs on Bun), **OpenCode ≥ 2.3.0**, plus **Spotify Desktop + Spicetify CLI ≥ 2.0.0**
-for live playback. Spicetify installs automatically on x64; on ARM64 (or when no
-matching release asset exists) the installer prints manual guidance instead.
+for live playback. Spicetify installs through the pinned, hash-verified official
+installer on x64; on ARM64 (or when no matching release asset exists) the
+installer prints manual guidance instead. Updates migrate every existing copy —
+official script, Winget, Scoop, or Chocolatey — through that same official
+installer, so there is never a second copy or a mixed package manager. The
+Spicetify Marketplace is installed by default (skip with `--no-marketplace`).
 
-After publication, register the exact version once, globally. `setup` performs the
+Register the exact version once, globally. `setup` performs the
 registration itself as one of its plan steps, so a single command installs:
 
 ```powershell
@@ -45,11 +43,11 @@ npx opencode-spotify@0.6.0-beta.3 setup
 ```
 
 Re-running `setup` on an already-registered install opens the maintenance menu
-(update targets only when achievable, Repair, Uninstall) — choose **Repair** to
-install the bridge.
+(Update to latest when achievable, Repair installation, Uninstall, Exit) —
+choose **Repair** to install the bridge.
 
-Then open Spotify and OpenCode in either order. The full walkthrough — including the
-pre-publication local-tarball path, existing-Spicetify handling, and lyrics-provider
+Then open Spotify and OpenCode in either order. The full walkthrough — including
+the local-tarball QA path, existing-Spicetify handling, and lyrics-provider
 setup — is in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
 ## Requirements
@@ -120,7 +118,8 @@ typing `UNINSTALL` interactively (or `--complete` with `--non-interactive` and `
 - Bridge reports "Config error" with no Spicetify install: expected until setup
   provisions the bridge. Run `setup` first.
 - `Duplicate plugin ID`: keep exactly one registration — remove the project-local
-  entry (or `-`-disable it) and restart OpenCode, including any background process.
+  entry (or `-`-disable it) and restart OpenCode, including any background process
+  (or run `opencode service restart`).
 - Something changed after a Spotify update: private Spicetify/Spotify APIs can break;
   check `doctor`, then `repair`.
 - Full command reference and fixes: [docs/USER_GUIDE.md](docs/USER_GUIDE.md).

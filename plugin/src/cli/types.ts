@@ -61,6 +61,11 @@ export interface CliOptions {
   removeCredentials: boolean
   /** Explicit complete-removal authorization (replaces env-var-only auth). */
   complete?: boolean
+  /**
+   * Install the Spicetify Marketplace by default. `false` (via
+   * `--no-marketplace`) skips it; unset means true.
+   */
+  marketplace?: boolean
   /** Override the package spec used for global registration (tests/enterprise pinning). */
   packageSpec?: string
 }

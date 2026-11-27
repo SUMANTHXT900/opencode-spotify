@@ -23,6 +23,7 @@ function defaults(): CliOptions {
     removeCredentials: false,
     complete: false,
     plain: false,
+    marketplace: true,
   }
 }
 
@@ -65,6 +66,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--accept-older-winget": options.acceptOlderWinget = true; break
       case "--remove-credentials": options.removeCredentials = true; break
       case "--complete": options.complete = true; break
+      case "--marketplace": options.marketplace = true; break
+      case "--no-marketplace": options.marketplace = false; break
       case "--package-spec": {
         const spec = value ?? argv[++index]
         if (!spec || spec.startsWith("-")) return { options, error: "--package-spec requires a value" }
@@ -112,6 +115,7 @@ Options:
   --spicetify <mode>        ask (default), auto, manual, or skip
   --apply                   Run spicetify apply after bridge preparation (confirm separately)
   --allow-spicetify-upgrade Permit a combined Spicetify CLI update
+  --no-marketplace          Skip the default Spicetify Marketplace installation
   --remove-credentials      Separately confirmed credential removal on uninstall
   --complete                Complete removal: interactive typed UNINSTALL, or --non-interactive + --yes
   --package-spec <spec>     Override the npm spec used for global registration

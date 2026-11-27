@@ -1,5 +1,11 @@
 import { join } from "node:path"
 import { OperationCancelled } from "./cancel.ts"
+import type { CancelToken } from "./cancel.ts"
+// Agent 1 owns src/cli/marketplace.ts. Import its contract types (do not
+// redefine them here); the runtime load in ensureMarketplace() is dynamic
+// with a soft-fail fallback so checkouts without that module still run.
+// @ts-ignore – resolves once Agent 1's marketplace module lands.
+import type * as MarketplaceContract from "./marketplace.ts"
 import { detectEnvironment } from "./detect.ts"
 import { addGlobalPlugin, projectPlugins, reconcileRegistration, removeGlobalPlugin } from "./opencode.ts"
 import { bridgeOperation } from "./bridge.ts"
@@ -191,16 +197,16 @@ export function resolvedSpicetifyTarget(
 }
 
 /**
- * Owner-aware achievable target. A script-owned copy is only updated to a
- * strictly stable release resolved by setup; manager-owned copies keep their
- * registry-resolved strict stable tag; an unknown owner has no safe target at
- * all (never an invented version).
+ * Owner-aware achievable target. Every installed Spicetify copy — including
+ * manager-owned (winget/scoop/choco) and unknown-owner copies — updates to
+ * the latest stable GitHub release through the pinned official installer
+ * (legacy-to-official migration; no second copy, no manager mixing). Only a
+ * missing or non-stable `latest` yields no target (never an invented version).
  */
 export function achievableSpicetifyTarget(
-  owner: SpicetifyInfo["owner"],
+  _owner: SpicetifyInfo["owner"],
   latest: string | null | undefined,
 ): string | null {
-  if (owner === "unknown") return null
   return stableVersion(latest)
 }
 
@@ -458,6 +464,93 @@ export interface EnsureSpicetifyDeps extends OfficialInstallerDeps {
     info: SpicetifyInfo,
     options: OfficialInstallerOptions,
   ) => Promise<CommandResult>
+  /**
+   * Marketplace seams (Agent 1 owns the real module). When omitted the
+   * dynamic `import("./marketplace.ts")` contract is used; when the module
+   * is absent ensureMarketplace() warns and continues.
+   */
+  inspectMarketplace?: (
+    runtime: Runtime,
+    spicetify: SpicetifyInfo,
+  ) => Promise<{ installed: boolean; registered: boolean }> | { installed: boolean; registered: boolean }
+  installMarketplace?: (
+    runtime: Runtime,
+    spicetify: SpicetifyInfo,
+    options?: { dryRun?: boolean; offline?: boolean; cancel?: CancelToken },
+  ) => Promise<{ status: "already-installed" | "installed" | "dry-run" | "skipped-offline" | "failed"; error?: string; guidance?: string }>
+    | { status: "already-installed" | "installed" | "dry-run" | "skipped-offline" | "failed"; error?: string; guidance?: string }
+}
+
+/**
+ * Ensure the Spicetify Marketplace is present (installed by default; opt out
+ * with `marketplace: false` / `--no-marketplace`). Soft-fail isolation:
+ * inspection/install failures warn and continue — they never fail setup.
+ * `dryRun`/`offline` flow through to installMarketplace.
+ */
+export async function ensureMarketplace(
+  ctx: OperationContext,
+  deps: Pick<EnsureSpicetifyDeps, "inspectMarketplace" | "installMarketplace"> = {},
+): Promise<void> {
+  if (ctx.options.marketplace === false) return
+  if (ctx.cancel.requested) return
+  const runtime = cancelAwareRuntime(ctx.runtime, ctx.cancel)
+  const spicetify = ctx.detection.spicetify
+  if (!spicetify.available) return
+  try {
+    const inspect = deps.inspectMarketplace ?? (await loadMarketplace())?.inspectMarketplace
+    if (inspect) {
+      try {
+        const state = await inspect(runtime, spicetify)
+        if (state && (state as { installed?: boolean }).installed === true &&
+          (state as { registered?: boolean }).registered === true) {
+          return
+        }
+      } catch (error) {
+        ctx.ui.warn(`Marketplace inspection failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+        return
+      }
+    }
+    const install = deps.installMarketplace ?? (await loadMarketplace())?.installMarketplace
+    if (!install) {
+      ctx.ui.warn("Spicetify Marketplace is not installed (marketplace module unavailable); continuing without it. Re-run setup without --no-marketplace once the marketplace module is available.")
+      return
+    }
+    let result: { status: string; error?: string; guidance?: string }
+    try {
+      result = await install(runtime, spicetify, {
+        dryRun: ctx.options.dryRun,
+        offline: ctx.options.offline,
+        cancel: ctx.cancel,
+      })
+    } catch (error) {
+      ctx.ui.warn(`Marketplace installation failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+      return
+    }
+    if (result.status === "failed") {
+      const detail = result.error ? ` Detail: ${sanitizeDetail(result.error)}` : ""
+      const guidance = result.guidance ? ` ${result.guidance}` : ""
+      ctx.ui.warn(`Marketplace installation failed; continuing without it.${detail}${guidance}`)
+    }
+  } catch (error) {
+    ctx.ui.warn(`Marketplace setup was skipped; continuing. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+  }
+}
+
+async function loadMarketplace(): Promise<{
+  inspectMarketplace?: EnsureSpicetifyDeps["inspectMarketplace"]
+  installMarketplace?: EnsureSpicetifyDeps["installMarketplace"]
+} | null> {
+  try {
+    // @ts-ignore – Agent 1 owns marketplace.ts; resolves once that module lands.
+    const mod = await import("./marketplace.ts") as {
+      inspectMarketplace?: EnsureSpicetifyDeps["inspectMarketplace"]
+      installMarketplace?: EnsureSpicetifyDeps["installMarketplace"]
+    }
+    if (!mod || (typeof mod.inspectMarketplace !== "function" && typeof mod.installMarketplace !== "function")) return null
+    return mod
+  } catch {
+    return null
+  }
 }
 
 export type EnsureSpicetifyStatus = "ready" | "declined" | "failed" | "confirmation-required" | "cancelled"
@@ -835,11 +928,12 @@ function printFinal(ctx: OperationContext, bridge: FinalBridgeState): void {
     ctx.ui.warn("Spicetify apply is still pending. Run `spicetify apply` yourself, or re-run setup with --apply.")
   }
   ctx.ui.bullet("Restart any running OpenCode process so the global plugin loads.")
+  ctx.ui.bullet("Restart running OpenCode processes (or run `opencode service restart`).")
   ctx.ui.bullet("Start Spotify Desktop, then open OpenCode in any project and wait for `Spotify ● Connected`.")
   ctx.ui.bullet("Connection and playback are confirmed only in the running TUI, not by file installation.")
 }
 
-async function maintenance(ctx: OperationContext): Promise<number> {
+async function maintenance(ctx: OperationContext, deps: EnsureSpicetifyDeps = {}): Promise<number> {
   const { ui, detection } = ctx
   ui.section("Existing installation detected")
   const plugin = ctx.versions.plugin
@@ -851,9 +945,10 @@ async function maintenance(ctx: OperationContext): Promise<number> {
     plugin.latestBeta ?? null,
   )
   const pluginOutdated = pluginInfo.status === "update-available"
-  // B32: only advertise an owner-safe target that actually exists and differs.
-  // A script-owned copy has no achievable target when `latest` is not a strict
-  // stable release; an unknown owner has no safe target at all.
+  // Official-installer-only: every installed copy (script, winget, scoop,
+  // choco, unknown) can update to the latest stable GitHub release through
+  // the pinned official installer (legacy-to-official migration). Only a
+  // missing/non-stable `latest` yields no target.
   const spicetifyTarget = achievableSpicetifyTarget(detection.spicetify.owner, spicetify.latest)
   const spicetifyState = updateAvailability({
     pluginInstalled: detection.opencode.plugin.version,
@@ -934,8 +1029,15 @@ async function maintenance(ctx: OperationContext): Promise<number> {
   ctx.options.yes = true
   // runUpdate already distinguishes its own cancellation (130) from a real
   // failure (1) and a missing confirmation (2); never override its code.
-  if (choice === "update") return runUpdate(ctx, updateKind ?? "plugin")
-  return runUpdate(ctx, choice === "both" ? "both" : choice === "spicetify" ? "spicetify" : "plugin")
+  // Marketplace fakes (tests) flow through so maintenance stays hermetic.
+  if (choice === "update") return runUpdate(ctx, updateKind ?? "plugin", {
+    ...(deps.inspectMarketplace ? { inspectMarketplace: deps.inspectMarketplace } : {}),
+    ...(deps.installMarketplace ? { installMarketplace: deps.installMarketplace } : {}),
+  })
+  return runUpdate(ctx, choice === "both" ? "both" : choice === "spicetify" ? "spicetify" : "plugin", {
+    ...(deps.inspectMarketplace ? { inspectMarketplace: deps.inspectMarketplace } : {}),
+    ...(deps.installMarketplace ? { installMarketplace: deps.installMarketplace } : {}),
+  })
 }
 
 /**
@@ -975,6 +1077,7 @@ export async function runSetup(ctx: OperationContext, deps: EnsureSpicetifyDeps 
     ui.section("Dry-run installation plan")
     let step = 1
     if (!ctx.detection.spicetify.available) ui.line(`  ${step++}. Install Spicetify with the pinned official installer or manual instructions (separately confirmed).`)
+    if (ctx.options.marketplace !== false) ui.line(`  ${step++}. Install the Spicetify Marketplace by default (skip with --no-marketplace).`)
     ui.line(`  ${step++}. Register the published package in the global OpenCode configuration.`)
     ui.line(`  ${step++}. Install or repair the bridge extension with a per-installation credential.`)
     ui.line(`  ${step}. Leave \`spicetify apply\` pending for separate authorization.`)
@@ -1005,7 +1108,7 @@ export async function runSetup(ctx: OperationContext, deps: EnsureSpicetifyDeps 
   }
   // Registered installs (including a local development path) enter the
   // maintenance menu so repair/uninstall stay reachable.
-  if (detection.opencode.plugin.registered) return maintenance(ctx)
+  if (detection.opencode.plugin.registered) return maintenance(ctx, deps)
   if (ctx.cancel.requested) return 130
 
   const localProject = (await projectPlugins(ctx.runtime)).find((entry) => isSpotifyPluginId(entry.id) && /[\\/]/.test(entry.source))
@@ -1068,6 +1171,10 @@ export async function runSetup(ctx: OperationContext, deps: EnsureSpicetifyDeps 
     return 1
   }
   // Check cancellation before apply starts, never between apply and verification.
+  if (ctx.cancel.requested) return 130
+  // Marketplace installs by default after Spicetify is ready and before
+  // `spicetify apply`. Soft-fail: warnings continue, never a failure.
+  await ensureMarketplace(ctx, deps)
   if (ctx.cancel.requested) return 130
   // Only a plan that actually prepared the bridge may ask for apply. A
   // registration-only run must never prompt for `spicetify apply`.

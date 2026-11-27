@@ -727,7 +727,7 @@ test("pre-existing Marketplace directories are preserved and treated as untouche
   assert.deepEqual(removed, []);
 });
 
-test("a Marketplace change after the run is still detected as defense-in-depth", async () => {
+test("a Marketplace change after the run warns but never fails verification", async () => {
   const runtime = executableOnly(officialRuntime(), { exists: false });
   const baseExists = runtime.exists.bind(runtime);
   let marketplace = false;
@@ -739,8 +739,10 @@ test("a Marketplace change after the run is still detected as defense-in-depth",
     },
   });
   const result = await installSpicetify(runtime, missingSpicetify(), h.deps);
-  assert.equal(result.code, 1);
-  assert.match(result.error ?? "", /^E_MARKETPLACE_CHANGED:/);
+  // Official-only engine: Marketplace is installed deterministically by
+  // marketplace.ts right after, so a change is a warning, never E_MARKETPLACE_CHANGED.
+  assert.equal(result.code, 0, result.error);
+  assert.doesNotMatch(result.error ?? "", /E_MARKETPLACE_CHANGED/);
 });
 
 // ---------------------------------------------------------------------------
@@ -849,10 +851,18 @@ test("post-check failures never invalidate a verified install", async () => {
   assert.doesNotMatch(result.stdout, /is now available/);
 });
 
-test("script-owned upgrades refuse unknown versions and downgrades, no-op on equality, and use the dynamic target otherwise", async () => {
-  const unknown = await upgradeSpicetify(officialRuntime(), installedSpicetify("nightly"), { approve: async () => true });
-  assert.match(unknown.error ?? "", /^E_VERSION_UNKNOWN:/);
-  assert.match(unknown.error ?? "", /could be a downgrade/);
+test("official-only upgrades migrate unknown versions, refuse downgrades, no-op on equality, and use the dynamic target", async () => {
+  // Unknown installed versions migrate through the official installer instead
+  // of refusing with E_VERSION_UNKNOWN (no downgrade comparison is possible).
+  const migrating = await upgradeSpicetify(officialRuntime(), installedSpicetify("nightly"), {
+    dryRun: true,
+    approve: async () => true,
+    resolveRelease: async () => ({ ok: true, release: futureRelease() }),
+    runInteractive: async () => avoided("execution"),
+  });
+  assert.equal(migrating.code, 0, migrating.error);
+  assert.match(migrating.stdout, /pinned official installer/);
+  assert.doesNotMatch(migrating.error ?? "", /E_VERSION_UNKNOWN/);
 
   const downgrade = await upgradeSpicetify(
     officialRuntime(),
@@ -888,40 +898,71 @@ test("script-owned upgrades refuse unknown versions and downgrades, no-op on equ
   assert.ok(!runtime.calls.some((call) => /spicetify(\.exe)? upgrade/i.test(call.args.join(" "))));
 });
 
-test("manager-owned upgrades use only their manager and never the official pipeline", async () => {
-  const runtime = fakeRuntime();
-  runtime.env.LOCALAPPDATA = "C:\\Users\\Test\\AppData\\Local";
-  runtime.env.PROCESSOR_ARCHITECTURE = "AMD64";
-  const baseWhich = runtime.which.bind(runtime);
-  runtime.which = async (name) => name === "winget" ? "C:\\winget.exe" : baseWhich(name);
-  const approvals: OfficialInstallerApproval[] = [];
-  const result = await upgradeSpicetify(runtime, installedSpicetify("2.46.0", "winget"), {
-    approve: async (details) => { approvals.push(details); return true; },
-  });
-  assert.equal(result.code, 0, result.error);
-  const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`);
-  assert.ok(commands.some((command) => command.startsWith("C:\\winget.exe upgrade --id Spicetify.Spicetify")));
-  assert.ok(!commands.some((command) => /spicetify(\.exe)? update/i.test(command)));
-  assert.equal(approvals[0]!.method, "winget");
-  // L5: a manager upgrade never claims Authenticode+version or a resolved
-  // release target; provenance is "manager" and the target is the owner info.
-  assert.equal(approvals[0]!.provenance, "manager");
-  assert.equal(approvals[0]!.targetVersion, "2.46.0");
-  assert.equal(approvals[0]!.patch, "none");
-  assert.doesNotMatch(approvals[0]!.warnings.join("\n"), /Authenticode/i);
+test("manager-owned upgrades use the official installer with best-effort migration (no manager upgrade)", async () => {
+  for (const owner of ["winget", "scoop", "choco", "unknown"] as const) {
+    const runtime = executableOnly(officialRuntime(), { exists: false });
+    const h = harness(runtime, {
+      resolveRelease: async () => ({ ok: true, release: futureRelease() }),
+    });
+    const baseWhich = runtime.which.bind(runtime);
+    runtime.which = (async (name: string) => {
+      if (name === "winget" || name === "scoop" || name === "choco") return undefined;
+      return baseWhich(name);
+    }) as typeof runtime.which;
+    const result = await upgradeSpicetify(runtime, installedSpicetify("2.46.0", owner), h.deps);
+    assert.equal(result.code, 0, `${owner}: ${result.error ?? ""}`);
+    assert.match(result.stdout, /pinned official installer( script)? \(Marketplace block removed\)/, owner);
+    assert.equal(h.approvals.length, 1, owner);
+    assert.equal(h.approvals[0]!.method, "official-installer", owner);
+    assert.equal(h.approvals[0]!.targetVersion, FUTURE_VERSION, owner);
+    assert.equal(h.approvals[0]!.provenance, "authenticode+version", owner);
+    assert.equal(h.approvals[0]!.patch, "marketplace-removed", owner);
+    assert.doesNotMatch(h.approvals[0]!.command, /winget upgrade|scoop update|choco upgrade/, owner);
+    const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`);
+    assert.ok(!commands.some((command) => /winget(\.exe)? upgrade/i.test(command)), owner);
+    assert.ok(!commands.some((command) => /scoop(\.exe)? update/i.test(command)), owner);
+    assert.ok(!commands.some((command) => /choco(\.exe)? upgrade/i.test(command)), owner);
+    assert.ok(!commands.some((command) => /spicetify(\.exe)? update/i.test(command)), owner);
+  }
 
-  // No installed version: an empty target is reported, never a fabricated one.
-  const noVersion = fakeRuntime();
-  noVersion.env.LOCALAPPDATA = "C:\\Users\\Test\\AppData\\Local";
-  noVersion.env.PROCESSOR_ARCHITECTURE = "AMD64";
-  const baseNoVersionWhich = noVersion.which.bind(noVersion);
-  noVersion.which = async (name) => name === "winget" ? "C:\\winget.exe" : baseNoVersionWhich(name);
-  const emptyApprovals: OfficialInstallerApproval[] = [];
-  await upgradeSpicetify(noVersion, installedSpicetify(null, "winget"), {
-    approve: async (details) => { emptyApprovals.push(details); return true; },
+  // Stale shim cleanup: a winget-owned copy with a manager present triggers a
+  // best-effort manager uninstall and prepends the official dir on PATH.
+  const shimRuntime = executableOnly(officialRuntime(), { exists: false });
+  shimRuntime.env.PATH = "C:\\Other\\bin";
+  const shimHarness = harness(shimRuntime, {
+    resolveRelease: async () => ({ ok: true, release: futureRelease() }),
   });
-  assert.equal(emptyApprovals[0]!.provenance, "manager");
-  assert.equal(emptyApprovals[0]!.targetVersion, "");
+  const shimBaseWhich = shimRuntime.which.bind(shimRuntime);
+  shimRuntime.which = (async (name: string) => {
+    if (name === "winget") return "C:\\winget.exe";
+    return shimBaseWhich(name);
+  }) as typeof shimRuntime.which;
+  const shimBaseRun = shimRuntime.run.bind(shimRuntime);
+  const managerCalls: string[] = [];
+  shimRuntime.run = (async (file: string, args: string[], options?: never) => {
+    if (file === "C:\\winget.exe") {
+      managerCalls.push(`${file} ${args.join(" ")}`);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return shimBaseRun(file, args, options);
+  }) as typeof shimRuntime.run;
+  const shimmed = await upgradeSpicetify(shimRuntime, installedSpicetify("2.46.0", "winget"), shimHarness.deps);
+  assert.equal(shimmed.code, 0, shimmed.error);
+  assert.ok(managerCalls.some((command) => command.includes("uninstall")), "shadowing manager copy is cleaned best-effort");
+  assert.match(shimRuntime.env.PATH ?? "", /C:\\Users\\Test\\AppData\\Local\\spicetify/i, "official dir wins on PATH");
+
+  // Manager absent: same upgrade still succeeds via the official installer.
+  const absentRuntime = executableOnly(officialRuntime(), { exists: false });
+  const absentHarness = harness(absentRuntime, {
+    resolveRelease: async () => ({ ok: true, release: futureRelease() }),
+  });
+  const absentBaseWhich = absentRuntime.which.bind(absentRuntime);
+  absentRuntime.which = (async (name: string) => {
+    if (name === "winget" || name === "scoop" || name === "choco") return undefined;
+    return absentBaseWhich(name);
+  }) as typeof absentRuntime.which;
+  const absent = await upgradeSpicetify(absentRuntime, installedSpicetify("2.46.0", "scoop"), absentHarness.deps);
+  assert.equal(absent.code, 0, absent.error);
 });
 
 test("upgrade resolution failure refuses with no fallback target", async () => {
@@ -984,7 +1025,7 @@ test("verifyOfficialSpicetify enforces the reviewed ledger only for its own vers
   assert.equal(unsupportedDigest.code, "E_NO_REVIEWED_DIGEST");
 });
 
-test("verification rejects a bad signer, a version mismatch, a missing executable and a changed Marketplace", async () => {
+test("verification rejects a bad signer, a version mismatch and a missing executable (Marketplace never fails)", async () => {
   const withSignature = async (payload: unknown, code = 0) => {
     const runtime = executableOnly(officialRuntime(FUTURE_VERSION));
     runtime.state.spicetify.version = FUTURE_VERSION;
@@ -1060,7 +1101,8 @@ test("verification rejects a bad signer, a version mismatch, a missing executabl
     },
     readUserPath: async () => LOCAL_DIR,
   });
-  assert.equal(changed.code, "E_MARKETPLACE_CHANGED");
+  assert.equal(changed.ok, true, changed.error);
+  assert.match(changed.warnings.join("\n"), /Marketplace state changed/);
 });
 
 // ---------------------------------------------------------------------------

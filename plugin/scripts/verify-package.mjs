@@ -440,6 +440,7 @@ function main() {
         "dist/cli/cancel.js",
         "dist/cli/children.js",
         "dist/cli/lock.js",
+        "dist/cli/marketplace.js",
         "dist/cli/spicetify-release.js",
         "dist/cli/spicetify-official.js",
         "dist/cli/state.js",
@@ -535,6 +536,7 @@ function main() {
       for (const required of [
         "dist/cli/main.js", "dist/cli/args.js", "dist/cli/ui/ink.js", "dist/cli/ui/ink-view.js",
         "dist/cli/ui-mode.js", "dist/cli/cancel.js", "dist/cli/children.js", "dist/cli/lock.js",
+        "dist/cli/marketplace.js",
         "dist/cli/spicetify-release.js", "dist/cli/spicetify-official.js", "dist/cli/state.js",
         "dist/cli/progress.js", "dist/scripts/provision.js", "dist/src/services/credentials.js",
       ]) {

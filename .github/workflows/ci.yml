@@ -35,7 +35,7 @@ permissions:
 # (or cancels) a standalone CI run. Main is never cancelled.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   checks-unit:
@@ -71,19 +71,35 @@ jobs:
           cache: npm
           cache-dependency-path: plugin/package-lock.json
 
+      - name: Cache actionlint binary
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/actionlint-1.7.12
+          key: actionlint-win-x64-1.7.12
+
       - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: npm ci --prefer-offline --ignore-scripts --no-audit --no-fund
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Check bridge JavaScript syntax
-        run: node --check spicetify/opencode-spotify-bridge.js
-
-      # Report all advisories. The documented baseline has moderate
-      # findings without a compatible fix; high and critical findings fail CI.
-      - name: Audit dependencies (fail on high or critical)
-        run: npm audit --audit-level=high
+      # Sub-second static/policy checks in one step: fewer runner slots, same
+      # gates (typecheck, bridge syntax, test accounting, release policy,
+      # candidate selftest, actionlint with cache dir). $LASTEXITCODE is
+      # checked after every command so no failure is masked.
+      - name: Static and policy checks (typecheck, syntax, accounting, policy, actionlint)
+        env:
+          ACTIONLINT_CACHE_DIR: ${{ runner.temp }}/actionlint-1.7.12
+        run: |
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node --check spicetify/opencode-spotify-bridge.js
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node scripts/check-test-accounting.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node --test ../.github/scripts/release-policy.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node scripts/compatibility-candidates.mjs selftest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          pwsh -NoProfile -File ../.github/scripts/actionlint.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       # Fast Node-only subset. The cheap packaging-behavior suites
       # (package-smoke, verify-artifact) run here inside test:fast; the single
@@ -91,18 +107,6 @@ jobs:
       # run in render-pack.
       - name: Run fast unit tests (Node-only; includes cheap packaging-behavior suites)
         run: npm run test:fast
-
-      - name: Check test accounting (every suite in exactly one bucket)
-        run: node scripts/check-test-accounting.mjs
-
-      - name: Lint workflow syntax (actionlint)
-        run: pwsh -NoProfile -File ../.github/scripts/actionlint.ps1
-
-      - name: Test release input and artifact policy
-        run: node --test ../.github/scripts/release-policy.test.mjs
-
-      - name: Test compatibility candidate selection and scratch boundaries
-        run: node scripts/compatibility-candidates.mjs selftest
 
   render-pack:
     name: Rendering and package verification (Windows + Bun)
@@ -113,6 +117,11 @@ jobs:
         shell: pwsh
         working-directory: plugin
     steps:
+      - name: Add Defender exclusions (best effort, non-fatal)
+        working-directory: ${{ github.workspace }}
+        run: |
+          try { Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $env:RUNNER_TEMP -ErrorAction SilentlyContinue } catch { }
+
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,17 +140,19 @@ jobs:
           bun-version: '1.3.14'
 
       - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: npm ci --prefer-offline --ignore-scripts --no-audit --no-fund
 
       # test:bun already runs artwork.test.ts and layout-render.test.ts, which
       # spawn the same render-artwork.tsx / render-layout.tsx fixtures as
       # test:artwork / test:render. Running both shapes executes each native
-      # suite twice.
-      - name: Run Bun-native suites (artwork, layout, tui-state)
-        run: npm run test:bun
-
-      - name: Verify persistent VT transitions
-        run: npm run test:vt
+      # suite twice. Combined with test:vt in one step; $LASTEXITCODE is
+      # checked after each so no failure is masked.
+      - name: Run Bun-native suites and verify persistent VT transitions
+        run: |
+          npm run test:bun
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          npm run test:vt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       # Single full verification. Without retention (plain CI) it packs,
       # asserts, installs and probes, then discards temp state. With retention

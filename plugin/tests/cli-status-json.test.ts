@@ -431,3 +431,111 @@ test("bunCheck reports presence or absence without failing diagnostics", () => {
   assert.equal(absent.status, "info")
   assert.match(absent.message, /Bun was not found/)
 })
+
+// ---------------------------------------------------------------------------
+// Agent-3: Marketplace status is read-only and official-installer-only.
+// ---------------------------------------------------------------------------
+
+function withMarketplace(
+  runtime: ReturnType<typeof fakeRuntime>,
+  detection: Detection,
+  configText: string | null,
+): void {
+  // Agent 1's inspectMarketplace: installed means CustomApps/marketplace holds
+  // index.js + manifest.json (exists and isFile); registered means the
+  // `custom_apps` entry lists the exact marketplace token.
+  const baseExists = runtime.exists.bind(runtime)
+  runtime.exists = (path: string) => (/marketplace/i.test(path) ? true : baseExists(path))
+  const baseIsFile = runtime.isFile.bind(runtime)
+  runtime.isFile = (path: string) => (/marketplace/i.test(path) ? true : baseIsFile(path))
+  if (configText !== null) {
+    const configPath = detection.spicetify.configPath
+    const baseRead = runtime.readText.bind(runtime)
+    runtime.readText = (path: string) => (path === configPath ? configText : baseRead(path))
+  }
+}
+
+test("status and doctor surface read-only Marketplace state (installed / not installed)", async () => {
+  const clean = await statusJson()
+  assert.deepEqual(clean.report.marketplace, { installed: false, registered: false })
+  assert.deepEqual(clean.runtime.calls, [], "marketplace observation must not execute commands")
+
+  const doctor = await doctorJson()
+  assert.deepEqual(doctor.report.environment.marketplace, { installed: false, registered: false })
+  const check = doctor.report.checks.find((entry) => entry.id === "marketplace")
+  assert.ok(check, "marketplace check missing")
+  assert.equal(check?.status, "info")
+  assert.match(check?.message ?? "", /not installed/i)
+
+  const present = await statusJson((runtime, detection) => {
+    withMarketplace(runtime, detection, "[AdditionalOptions]\ncustom_apps = marketplace\n")
+  })
+  assert.deepEqual(present.report.marketplace, { installed: true, registered: true })
+  assert.deepEqual(present.runtime.calls, [], "marketplace observation must not execute commands")
+
+  const unregistered = await statusJson((runtime, detection) => {
+    // The legacy `extensions` key never counts: only `custom_apps` registers.
+    withMarketplace(runtime, detection, "[AdditionalOptions]\nextensions = marketplace\n")
+  })
+  assert.deepEqual(unregistered.report.marketplace, { installed: true, registered: false })
+
+  const unreadable = await statusJson((runtime, detection) => {
+    withMarketplace(runtime, detection, null)
+    runtime.readText = () => { throw new Error("denied") }
+  })
+  assert.deepEqual(unreadable.report.marketplace, { installed: true, registered: false })
+})
+
+test("status text names the Marketplace state without implying management", async () => {
+  const runtime = fakeRuntime()
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt(), { command: "status" })
+  ctx.detection = fakeDetection(runtime)
+  assert.equal(await runStatus(ctx), 0)
+  assert.ok(ui.lines.join("\n").includes("Marketplace: not installed"))
+
+  const installedRuntime = fakeRuntime()
+  const installedUi = fakeUi()
+  const installedCtx = context(installedRuntime, installedUi, fakePrompt(), { command: "status" })
+  installedCtx.detection = fakeDetection(installedRuntime)
+  withMarketplace(installedRuntime, installedCtx.detection, "[AdditionalOptions]\ncustom_apps = marketplace\n")
+  assert.equal(await runStatus(installedCtx), 0)
+  assert.ok(installedUi.lines.join("\n").includes("Marketplace: installed; registered"))
+})
+
+test("outdated Spicetify points at the official installer, never a manager command", async () => {
+  const { report } = await doctorJson((_runtime, detection) => {
+    detection.spicetify = { ...detection.spicetify, version: "1.0.0" }
+  })
+  const version = report.checks.find((check) => check.id === "spicetify-version")
+  assert.ok(version, "spicetify-version check missing")
+  assert.equal(version?.status, "warn")
+  assert.match(version?.fix ?? "", /opencode-spotify update.*official installer/)
+  const guidance = report.checks.map((check) => `${check.message} ${check.fix ?? ""}`).join("\n")
+  assert.doesNotMatch(guidance, /method that owns this copy/i)
+  assert.doesNotMatch(guidance, /do not mix package managers/i)
+  assert.doesNotMatch(guidance, /winget\s+(?:install|upgrade)/i)
+  assert.doesNotMatch(guidance, /scoop update/i)
+  assert.doesNotMatch(guidance, /choco upgrade/i)
+  assert.match(guidance, /official installer/i)
+})
+
+test("a legacy manager Spicetify copy gets a migration note toward the official installer", async () => {
+  const { report } = await doctorJson((_runtime, detection) => {
+    detection.spicetify = { ...detection.spicetify, owner: "winget" }
+  })
+  const note = report.checks.find((check) => check.id === "spicetify-manager")
+  assert.ok(note, "spicetify-manager migration note missing")
+  assert.equal(note?.status, "info")
+  assert.match(note?.message ?? "", /legacy manager path/i)
+  assert.match(note?.message ?? "", /winget package/i)
+  assert.match(note?.fix ?? "", /opencode-spotify update.*official installer/)
+  assert.match(note?.fix ?? "", /latest official release/i)
+  const guidance = report.checks.map((check) => `${check.message} ${check.fix ?? ""}`).join("\n")
+  assert.doesNotMatch(guidance, /winget\s+(?:install|upgrade)/i)
+  assert.match(guidance, /official installer/i)
+
+  // No manager note for script-owned or unknown copies.
+  const clean = await doctorJson()
+  assert.equal(clean.report.checks.find((check) => check.id === "spicetify-manager"), undefined)
+})

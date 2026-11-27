@@ -560,3 +560,17 @@ test("manual instructions and result screen cover cancellation, failure and exit
   assert.equal(resultExitCode("confirmation-required"), 2)
   assert.equal(resultExitCode("failed"), 1)
 })
+
+test("selection and explanation disclose the pinned installer plus Marketplace default", () => {
+  const sel = fakeUi()
+  renderSelectionScreen(sel, { installedVersion: null, latestVersion: "2.46.7" })
+  const selText = text(sel)
+  assert.match(selText, /pinned official installer/i)
+  assert.match(selText, /Marketplace.*installed by default.*--no-marketplace/i)
+
+  const exp = fakeUi()
+  renderOfficialInstallerExplanation(exp, OFFICIAL_INSTALLER, { installedVersion: null, latestVersion: "2.46.7" })
+  const expText = text(exp)
+  assert.match(expText, /Spicetify installs via the pinned official installer/i)
+  assert.match(expText, /Marketplace.*installed by default.*--no-marketplace/i)
+})

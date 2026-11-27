@@ -1,5 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { parseArgs, helpText } from "../src/cli/args.ts"
 import { runStatus } from "../src/cli/status.ts"
 import { runDoctor } from "../src/cli/doctor.ts"
 import { runSetup } from "../src/cli/setup.ts"
@@ -186,14 +187,14 @@ test("update refuses downgrades and unknown registry state", async () => {
   assert.equal(mutating(unknown.calls).length, 0)
 })
 
-test("combined update upgrades Spicetify first, then the plugin", async () => {
+test("combined update upgrades Spicetify first via official, then the plugin", async () => {
   const runtime = fakeRuntime()
   runtime.state.opencode.listVersion = "0.5.7"
   runtime.state.spicetify.version = "2.46.0"
   const which = runtime.which.bind(runtime)
   runtime.which = async (name: string) => (name === "winget" ? "C:\\winget.exe" : which(name))
   const ui = fakeUi()
-  const ctx = context(runtime, ui, fakePrompt(), { command: "update", yes: true, allowSpicetifyUpgrade: true })
+  const ctx = context(runtime, ui, fakePrompt(), { command: "update", yes: true, allowSpicetifyUpgrade: true, marketplace: false })
   ctx.detection = fakeDetection(runtime)
   ctx.detection.spicetify = {
     ...ctx.detection.spicetify,
@@ -202,17 +203,29 @@ test("combined update upgrades Spicetify first, then the plugin", async () => {
   }
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
-  assert.equal(await runUpdate(ctx, "both"), 0, ui.lines.join("\n"))
+  let upgradedOwner: string | undefined
+  const deps = {
+    inspectMarketplace: async () => ({ installed: true, registered: true }),
+    installMarketplace: async () => ({ status: "already-installed" as const }),
+    upgradeSpicetify: async (_rt: unknown, info: { owner: string }) => {
+      upgradedOwner = info.owner
+      runtime.state.spicetify.version = "2.47.0"
+      return { code: 0 as const, stdout: "upgraded via official", stderr: "" }
+    },
+  }
+  assert.equal(await runUpdate(ctx, "both", deps), 0, ui.lines.join("\n"))
+  assert.equal(upgradedOwner, "script", "legacy winget copy migrates to official")
   const commands = runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
   const add = commands.findIndex((command) => command.includes("plugin add"))
-  const upgrade = commands.findIndex((command) => command.startsWith("C:\\winget.exe upgrade"))
   assert.ok(add >= 0, "plugin update must run")
-  assert.ok(upgrade >= 0, "Spicetify update must run through its owner")
-  assert.ok(upgrade < add, "Spicetify step must precede the plugin update")
+  assert.ok(!commands.some((command) => command.startsWith("C:\\winget.exe upgrade")), "no manager upgrade")
   // Owner-safe Spicetify route never uses the unverified self-updater.
   assert.ok(!commands.some((command) => command === "C:\\Users\\Test\\AppData\\Local\\spicetify\\spicetify.exe upgrade"),
     "combined update must not invoke spicetify.exe upgrade")
   const text = ui.lines.join("\n")
+  assert.match(text, /official installer/i)
+  assert.match(text, /migrate/i)
+  assert.match(text, /opencode service restart/i)
   const spicetifyStep = text.indexOf("Spicetify")
   const pluginStep = text.indexOf("plugin add")
   assert.ok(spicetifyStep >= 0 && (pluginStep < 0 || spicetifyStep < pluginStep),
@@ -510,4 +523,59 @@ test("a cancelled repair reports completed and skipped steps honestly", async ()
   assert.match(text, /Completed steps: register-global-plugin/)
   assert.match(text, /Not run: repair-bridge/)
   assert.ok(!/Bridge: repaired and applied/i.test(text), text)
+})
+
+test("--marketplace defaults to true and --no-marketplace opts out", () => {
+  assert.equal(parseArgs([]).options.marketplace, true)
+  assert.equal(parseArgs(["setup"]).options.marketplace, true)
+  assert.equal(parseArgs(["setup", "--marketplace"]).options.marketplace, true)
+  assert.equal(parseArgs(["setup", "--no-marketplace"]).options.marketplace, false)
+  assert.equal(parseArgs(["update", "--no-marketplace"]).options.marketplace, false)
+  assert.match(helpText(), /--no-marketplace/)
+})
+
+test("fresh setup installs Marketplace by default and prints service-restart guidance", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = null
+  runtime.state.bridge.installed = false
+  runtime.state.bridge.extensionCurrent = false
+  runtime.state.spicetify.registered = false
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt({ confirms: [true, false] }), { command: "setup", yes: false })
+  ctx.detection = fakeDetection(runtime)
+  let installed = false
+  const deps = {
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async () => {
+      installed = true
+      return { status: "installed" as const }
+    },
+  }
+  assert.equal(await runSetup(ctx, deps), 0, ui.lines.join("\n"))
+  assert.equal(installed, true)
+  assert.match(ui.lines.join("\n"), /opencode service restart/i)
+})
+
+test("fresh setup with --no-marketplace skips the Marketplace entirely", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = null
+  runtime.state.bridge.installed = false
+  runtime.state.bridge.extensionCurrent = false
+  runtime.state.spicetify.registered = false
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt({ confirms: [true, false] }), { command: "setup", yes: false, marketplace: false })
+  ctx.detection = fakeDetection(runtime)
+  let calls = 0
+  const deps = {
+    inspectMarketplace: async () => {
+      calls += 1
+      return { installed: false, registered: false }
+    },
+    installMarketplace: async () => {
+      calls += 1
+      return { status: "installed" as const }
+    },
+  }
+  assert.equal(await runSetup(ctx, deps), 0, ui.lines.join("\n"))
+  assert.equal(calls, 0)
 })

@@ -2,15 +2,19 @@
 
 ## Unreleased
 
+- Tag-triggered npm release: pushing `vX.Y.Z` (stable, `latest`) or
+  `vX.Y.Z-beta.N` (prerelease, `beta`) runs the full CI gates, then publishes
+  the exact verified tarball with OIDC `--provenance` and attaches it to the
+  GitHub Release. The manual prepare/publish flow is retired.
 - Documentation restructure only: user guide, maintainer guide, and release QA
   checklist replace the beta-era working docs. No functional product changes
   (docs/comments plus a test-only capture-path fix).
 
-## 0.6.0-beta.3 (unpublished)
+## 0.6.0-beta.3
 
-Registry state: `0.6.0-beta.1` and `0.6.0-beta.2` are published (`latest` points
-at beta.1, `beta` at beta.2). Beta.3 has no registry artifact; QA uses the local
-tarball.
+Registry state: `0.6.0-beta.1` and `0.6.0-beta.2` were published earlier
+(`latest` points at beta.1, `beta` at beta.2). Beta.3 ships under the `beta`
+dist-tag via the tag-triggered release workflow (`v0.6.0-beta.3`).
 
 ### Added
 
@@ -38,9 +42,10 @@ tarball.
   global registration, placeholder-secret enforcement, and the one-gate
   `verify:package` check (pack list, isolated install, packed import resolution,
   server/TUI load, installed `bin --version`/`--help`).
-- Manual OIDC release workflow: prepare-then-publish with SHA-256 + SHA-512 digest
-  attestation, `beta`/`latest` channel handling, `NPM_PUBLISH_ENABLED` kill
-  switch, and SHA-pinned actions.
+- Tag-triggered OIDC release workflow: tag push runs CI verification, then a
+  single `npm view` duplicate/monotonicity preflight, `--provenance` publish
+  of the exact verified bytes, registry verification, and a GitHub Release
+  with the tarball and digests attached. No tokens; SHA-pinned actions.
 
 ### Changed
 
@@ -82,7 +87,7 @@ tarball.
   general PII/secret scan.
 - Release path uses short-lived OIDC, SHA-pinned actions, read-only top-level
   permissions, and publishes the exact tarball release preparation verified.
-  Provenance omitted while the repository is private.
+  Provenance is attached via OIDC trusted publishing.
 
 ## 0.6.0-beta.2 (published, superseded by beta.3 for TUI loading)
 

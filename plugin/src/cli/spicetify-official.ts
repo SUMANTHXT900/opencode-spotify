@@ -1102,18 +1102,18 @@ export async function verifyOfficialSpicetify(
   }
 
   if (options.marketplaceBefore) {
+    // Official-only engine: Marketplace is installed deterministically by
+    // marketplace.ts right after the official flow, so a change observed here
+    // is reported as a warning (defense-in-depth visibility) and never fails
+    // verification. The installer itself never runs Invoke-Expression nor a
+    // duplicate Marketplace prompt; the reviewed Marketplace-region comment
+    // patch on install.ps1 is retained.
     const after = snapshotMarketplace(runtime);
     const changed = marketplacePaths(runtime).filter(
       (path) => (options.marketplaceBefore as Record<string, boolean>)[path] !== after[path],
     );
     if (changed.length) {
-      return {
-        ok: false,
-        code: "E_MARKETPLACE_CHANGED",
-        error: `Marketplace directories changed unexpectedly: ${changed.join(", ")}`,
-        provenance,
-        warnings,
-      };
+      warnings.push(`Marketplace state changed during the official install: ${changed.join(", ")}.`);
     }
   }
 
@@ -1125,8 +1125,8 @@ function ensureProcessPath(runtime: Runtime, dir: string): void {
     const current = typeof runtime.env.PATH === "string" ? runtime.env.PATH : "";
     const wanted = normalizePathEntry(dir);
     if (current.split(";").map(normalizePathEntry).filter(Boolean).includes(wanted)) return;
-    const trimmed = current.replace(/;+$/, "");
-    runtime.env.PATH = trimmed ? `${trimmed};${dir}` : dir;
+    const trimmed = current.replace(/^;+|;+$/g, "");
+    runtime.env.PATH = trimmed ? `${dir};${trimmed}` : dir;
   } catch {
     // Best effort: the direct executable probe above was authoritative.
   }
@@ -1295,82 +1295,141 @@ async function probeInstalled(runtime: Runtime): Promise<{ available: boolean; v
   }
 }
 
-/** Manager-owned upgrades use only the owner's manager. Never `spicetify update`. */
-async function upgradeManagerOwned(
+/** Manager uninstall spec for pre-install migration (official-only engine).
+ *  Best-effort cleanup of a shadowing winget/scoop/choco copy; never fatal.
+ *  Duplicated from spicetify.ts to avoid a module cycle. */
+function localManagerUninstallArgs(owner: SpicetifyInfo["owner"]): { binary: string; args: string[] } | null {
+  if (owner === "winget") {
+    return {
+      binary: "winget",
+      args: ["uninstall", "--id", WINGET_ID, "-e", "--accept-source-agreements", "--disable-interactivity"],
+    };
+  }
+  if (owner === "scoop") return { binary: "scoop", args: ["uninstall", "spicetify-cli"] };
+  if (owner === "choco") return { binary: "choco", args: ["uninstall", "spicetify-cli", "-y"] };
+  return null;
+}
+
+function ensureProcessPathPrepend(runtime: Runtime, dir: string): void {
+  try {
+    const current = typeof runtime.env.PATH === "string" ? runtime.env.PATH : "";
+    const wanted = normalizePathEntry(dir);
+    if (current.split(";").map(normalizePathEntry).filter(Boolean).includes(wanted)) return;
+    const trimmed = current.replace(/^;+|;+$/g, "");
+    runtime.env.PATH = trimmed ? `${dir};${trimmed}` : dir;
+  } catch {
+    // Best effort.
+  }
+}
+
+/**
+ * Pre-install migration for the official-only engine. When an existing
+ * install is manager-owned (winget/scoop/choco) or lives outside the
+ * canonical %LOCALAPPDATA%\\spicetify directory, best-effort uninstall the
+ * shadowing manager copy via managerUninstallArgs (non-fatal when the
+ * manager is absent) and ensure the official directory is prepended/present
+ * in the user PATH and runtime.env.PATH so the official binary wins.
+ */
+async function migrateManagerShadow(
   runtime: Runtime,
   info: SpicetifyInfo,
   options: OfficialInstallerOptions,
-): Promise<CommandResult> {
+  pwsh: string,
+  onProgress?: (line: string) => void,
+): Promise<{ migrated: boolean; warnings: string[] }> {
+  if (!info.available) return { migrated: false, warnings: [] };
   const owner = info.owner;
-  if (owner !== "winget" && owner !== "scoop" && owner !== "choco") {
-    return failed("E_OWNER", `Manager upgrade only applies to winget/scoop/Chocolatey installations; this copy is ${owner}.`);
+  const officialDir = officialSpicetifyDir(runtime);
+  let outsideCanonical = false;
+  try {
+    const exeDir = info.path ? dirname(info.path) : "";
+    outsideCanonical = exeDir.toLowerCase() !== officialDir.toLowerCase();
+  } catch {
+    outsideCanonical = false;
   }
-  const spec = owner === "winget"
-    ? {
-        binary: "winget",
-        args: ["upgrade", "--id", WINGET_ID, "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"],
-        source: `winget: ${WINGET_ID}`,
-        guidance: `winget upgrade --id ${WINGET_ID} -e`,
-      }
-    : owner === "scoop"
-      ? {
-          binary: "scoop",
-          args: ["update", "spicetify-cli"],
-          source: "scoop: spicetify-cli",
-          guidance: "scoop update spicetify-cli",
+  const isManagerOwned = owner === "winget" || owner === "scoop" || owner === "choco";
+  if (!isManagerOwned && !outsideCanonical) return { migrated: false, warnings: [] };
+  const warnings: string[] = [];
+  if (isManagerOwned) {
+    const spec = localManagerUninstallArgs(owner);
+    if (spec) {
+      try {
+        const file = await runtime.which(spec.binary).catch(() => undefined);
+        if (!file) {
+          warnings.push(
+            `Shadowing ${owner}-owned Spicetify found; ${spec.binary} is not on PATH so no manager uninstall ran — the official binary wins via PATH.`,
+          );
+        } else {
+          if (!options.cancel?.requested) {
+            try {
+              const result = await runtime.run(file, spec.args, {
+                timeoutMs: OPERATION_TIMEOUTS.packageInstall,
+                ...(options.cancel ? { cancel: options.cancel } : {}),
+              });
+              if (result.cancelled) {
+                warnings.push(`Manager cleanup for ${owner} was stopped by cancellation; continuing with the official install.`);
+              } else if (result.code !== 0) {
+                warnings.push(
+                  `Manager cleanup for ${owner} reported code ${result.code}; continuing — the official binary wins via PATH.`,
+                );
+              } else {
+                warnings.push(`Removed shadowing ${owner}-owned Spicetify via ${spec.binary}; the official binary wins via PATH.`);
+              }
+            } catch {
+              warnings.push(`Manager cleanup for ${owner} could not run; continuing — the official binary wins via PATH.`);
+            }
+          }
         }
-      : {
-          binary: "choco",
-          args: ["upgrade", "spicetify-cli", "-y"],
-          source: "chocolatey: spicetify-cli",
-          guidance: "choco upgrade spicetify-cli -y",
-        };
-
-  if (options.dryRun) {
-    return { code: 0, stdout: `Would run: ${spec.binary} ${spec.args.join(" ")}`, stderr: "" };
-  }
-  const file = await runtime.which(spec.binary).catch(() => undefined);
-  if (!file) {
-    return failed(
-      "E_MANAGER",
-      `${spec.binary} was not found on PATH; update this ${owner}-owned Spicetify manually (${spec.guidance}) or reinstall it with ${owner}.`,
+      } catch {
+        // Non-fatal by design.
+      }
+    }
+  } else {
+    warnings.push(
+      `Existing Spicetify at ${info.path ?? "unknown path"} is outside ${officialDir}; the official binary wins via PATH.`,
     );
   }
-  if (!options.approve) {
-    return failed("E_APPROVAL", "Spicetify upgrade requires explicit approval; no approval handler was provided.");
-  }
-  const command = `${file} ${spec.args.join(" ")}`;
-  options.log?.out(`Spicetify upgrade: ${command}`);
-  options.log?.out(`Source: ${spec.source}`);
-  let approved = false;
   try {
-    approved = await options.approve({
-      method: owner,
-      intent: "upgrade",
-      command,
-      source: spec.source,
-      scriptUrl: "",
-      scriptSha256: "",
-      executedSha256: "",
-      targetVersion: info.version ?? "",
-      // L5: the manager owns the artifact and its provenance. No Authenticode
-      // check and no resolved release target were performed for this copy.
-      provenance: "manager",
-      resolvedAt: resolveNowValue(undefined),
-      patch: "none",
-      interactive: false,
-      warnings: [
-        "Manager-owned installation: its own upgrade command is used; the portable official installer is never overlaid.",
-      ],
-    });
+    ensureProcessPathPrepend(runtime, officialDir);
   } catch {
-    approved = false;
+    // Best effort.
   }
-  if (!approved) return failed("E_APPROVAL", "Spicetify upgrade declined.");
-  return runtime.run(file, spec.args, {
-    timeoutMs: OPERATION_TIMEOUTS.packageInstall,
-    ...(options.cancel ? { cancel: options.cancel } : {}),
-  });
+  try {
+    const read = options.readUserPath ?? defaultReadUserPath;
+    const write = options.writeUserPath ?? defaultWriteUserPath;
+    const current = await read(runtime, pwsh).catch(() => null);
+    if (current !== null) {
+      const wanted = normalizePathEntry(officialDir);
+      const entries = current.split(";").map((entry) => entry.trim()).filter(Boolean);
+      const has = entries.some((entry) => normalizePathEntry(entry) === wanted);
+      if (!has) {
+        const next = current ? `${officialDir};${current}` : officialDir;
+        let ok = false;
+        try {
+          ok = await write(runtime, pwsh, next);
+        } catch {
+          ok = false;
+        }
+        if (ok) warnings.push(`Prepended ${officialDir} to the user PATH so the official binary wins.`);
+        else warnings.push(`Could not prepend ${officialDir} to the user PATH; the installer adds it.`);
+      }
+    }
+  } catch {
+    // Best-effort PATH ensure only.
+  }
+  try {
+    onProgress?.("Pre-install migration: shadowing copy cleaned (best-effort); official directory prioritized on PATH.");
+  } catch {
+    // Progress only.
+  }
+  for (const warning of warnings) {
+    try {
+      options.log?.out(`Migration: ${warning}`);
+    } catch {
+      // Log only.
+    }
+  }
+  return { migrated: true, warnings };
 }
 
 async function runOfficialFlow(
@@ -1543,6 +1602,16 @@ async function runOfficialFlow(
     return failed("E_APPROVAL", "Spicetify installation via the official installer was declined.");
   }
   if (isCancelled(options.cancel)) return cancelledResult("The operation was cancelled after approval; nothing was installed.");
+
+  // Official-only pre-install migration: clean a shadowing manager copy and
+  // prioritize the official directory on PATH so the official binary wins.
+  // Best-effort and non-fatal by design.
+  try {
+    await migrateManagerShadow(runtime, info, options, pwsh, progress);
+  } catch {
+    // Migration never fails the install.
+  }
+  if (isCancelled(options.cancel)) return cancelledResult("The operation was cancelled after migration; nothing was installed.");
 
   progress(`Downloading the pinned official installer script (${OFFICIAL_INSTALLER_COMMIT.slice(0, 12)}).`);
   let bytes = options.scriptBytes;
@@ -1793,48 +1862,26 @@ async function runOfficialFlow(
 }
 
 /**
- * Fresh install only. Existing installs (any owner) are refused: manager-owned
- * copies must be upgraded by their manager, and an official-script copy must
- * use upgradeSpicetify. Dry-run never performs network or approval work.
+ * Official-only install. Every owner (script/winget/scoop/choco/unknown) uses
+ * the pinned official installer via runOfficialFlow; shadowing manager copies
+ * are cleaned best-effort inside the flow. Never refuses with E_OWNER.
+ * Dry-run never performs network or approval work.
  */
 export async function installSpicetify(
   runtime: Runtime,
   info: SpicetifyInfo,
   options: OfficialInstallerOptions = {},
 ): Promise<CommandResult> {
-  if (info.available) {
-    if (info.owner === "winget" || info.owner === "scoop" || info.owner === "choco") {
-      const guidance = info.owner === "winget"
-        ? `winget upgrade --id ${WINGET_ID} -e`
-        : info.owner === "scoop"
-          ? "scoop update spicetify"
-          : "choco upgrade spicetify -y";
-      return failed(
-        "E_OWNER",
-        `Spicetify is already installed by ${info.owner} at ${info.path ?? "unknown path"}. It will not be overlaid; update it with its manager instead (${guidance}).`,
-      );
-    }
-    if (info.owner === "script") {
-      return failed(
-        "E_OWNER",
-        `Spicetify is already installed at ${info.path ?? "unknown path"}. Fresh installation only runs when Spicetify is absent; use upgrade instead.`,
-      );
-    }
-    return failed(
-      "E_OWNER",
-      `Spicetify at ${info.path ?? "unknown path"} has an unknown owner. Refusing to overlay it; uninstall it deliberately or update it with the tool that installed it.`,
-    );
-  }
   return runOfficialFlow(runtime, info, options, "install");
 }
 
 /**
- * Owner-aware upgrade:
- *   * script-owned -> dynamic latest stable via the pinned official installer
- *     (never `spicetify update`, never a static target, never a downgrade),
- *   * winget/scoop/choco -> that manager's existing upgrade command,
- *   * unknown -> refused.
- * Dry-run and approval rules are always preserved.
+ * Official-only upgrade:
+ *   * script/winget/scoop/choco/unknown -> dynamic latest stable via the
+ *     pinned official installer (never `spicetify update`, never a static
+ *     target, never a downgrade),
+ *   * pre-install migration cleans a shadowing manager copy best-effort.
+ * Never refuses with E_OWNER. Dry-run and approval rules are preserved.
  */
 export async function upgradeSpicetify(
   runtime: Runtime,
@@ -1842,24 +1889,35 @@ export async function upgradeSpicetify(
   options: OfficialUpgradeOptions = {},
 ): Promise<CommandResult> {
   if (!info.available || !info.path) {
-    return failed("E_OWNER", "Spicetify is not installed; run setup to install it first.");
-  }
-  if (info.owner === "unknown") {
-    return failed(
-      "E_OWNER",
-      `Unknown Spicetify install owner at ${info.path}. Refusing to upgrade; use the tool that installed it or reinstall deliberately.`,
-    );
-  }
-  if (info.owner === "winget" || info.owner === "scoop" || info.owner === "choco") {
-    return upgradeManagerOwned(runtime, info, options);
+    return runOfficialFlow(runtime, info, options, "upgrade");
   }
 
   const installed = parseStableVersion(info.version);
   if (!installed) {
-    return failed(
-      "E_VERSION_UNKNOWN",
-      `Installed Spicetify version ${JSON.stringify(info.version ?? null)} cannot be parsed; refusing an upgrade that could be a downgrade.`,
-    );
+    if (options.dryRun) {
+      const target = options.release?.version ?? "latest stable (resolved at run time)";
+      return {
+        code: 0,
+        stdout: `Would upgrade Spicetify ${info.version ?? "unknown"} to ${target} via the pinned official installer (Marketplace block removed).`,
+        stderr: "",
+      };
+    }
+    let release = options.release;
+    if (!release) {
+      if (options.offline) {
+        return failed("E_OFFLINE", `Offline mode: the latest stable Spicetify release cannot be resolved. ${manualHint()}`);
+      }
+      const arch = options.arch === undefined
+        ? spicetifyArchToken(runtime.arch, runtime.env.PROCESSOR_ARCHITECTURE as string | undefined)
+        : spicetifyArchToken(options.arch);
+      const resolved = await resolveTarget(runtime, options, arch);
+      if (isCancelled(options.cancel)) return cancelledResult("The operation was cancelled during release resolution.");
+      if (!resolved.ok) {
+        return failed(resolved.code, `${resolved.error} ${manualHint()}`);
+      }
+      release = resolved.release;
+    }
+    return runOfficialFlow(runtime, info, { ...options, release }, "upgrade");
   }
   if (options.dryRun) {
     const target = options.release?.version ?? "latest stable (resolved at run time)";

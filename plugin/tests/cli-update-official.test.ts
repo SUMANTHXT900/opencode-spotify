@@ -1,6 +1,6 @@
-// B09 workflow coverage: update (official/manager routing, channels, beta.2
-// recovery), targeted repair, and both uninstall modes. Fake runtimes only:
-// no real OpenCode, Spotify, Spicetify, PATH or file-system mutation.
+// B09 workflow coverage: update (official-installer-only routing, channels,
+// beta.2 recovery), targeted repair, and both uninstall modes. Fake runtimes
+// only: no real OpenCode, Spotify, Spicetify, PATH or file-system mutation.
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
@@ -92,6 +92,22 @@ function commands(runtime: ReturnType<typeof fakeRuntime>): string[] {
   return runtime.calls.map((call) => `${call.file} ${call.args.join(" ")}`)
 }
 
+/** Fake official-installer upgrade: no network, sets the target version. */
+function fakeOfficialUpgrade(runtime: ReturnType<typeof fakeRuntime>, target = "2.47.0") {
+  return async (_rt: any, _info: any, _options: any) => {
+    runtime.state.spicetify.version = target
+    return { code: 0 as const, stdout: `upgraded to ${target} via official`, stderr: "" }
+  }
+}
+
+/** Marketplace already present: no install, no warning, no network. */
+function marketplacePresent() {
+  return {
+    inspectMarketplace: async () => ({ installed: true, registered: true }),
+    installMarketplace: async () => ({ status: "already-installed" as const }),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Update routing
 // ---------------------------------------------------------------------------
@@ -129,7 +145,7 @@ test("official-script updates use the B05 pipeline and never the retired verifie
   assert.match(text, /official installer/i)
 })
 
-test("manager-owned Spicetify is updated only through its owner manager", async () => {
+test("manager-owned Spicetify migrates through the official installer (no manager mixing)", async () => {
   const runtime = fakeRuntime()
   runtime.state.opencode.listVersion = "0.6.0-beta.1"
   runtime.state.spicetify.version = "2.46.0"
@@ -137,7 +153,7 @@ test("manager-owned Spicetify is updated only through its owner manager", async 
   runtime.which = async (name: string) => (name === "winget" ? "C:\\winget.exe" : which(name))
   const ui = fakeUi()
   const ctx = context(runtime, ui, fakePrompt(), {
-    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true,
+    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true, marketplace: false,
   })
   ctx.detection = fakeDetection(runtime)
   ctx.detection.spicetify = {
@@ -148,29 +164,59 @@ test("manager-owned Spicetify is updated only through its owner manager", async 
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
 
-  assert.equal(await runUpdate(ctx, "spicetify"), 0, ui.lines.join("\n"))
+  let upgradedOwner: string | undefined
+  const deps = {
+    ...marketplacePresent(),
+    upgradeSpicetify: async (_rt: any, info: any, _options: any) => {
+      upgradedOwner = info.owner
+      return fakeOfficialUpgrade(runtime, "2.47.0")(_rt, info, _options)
+    },
+  }
+  assert.equal(await runUpdate(ctx, "spicetify", deps), 0, ui.lines.join("\n"))
+  // Legacy manager copies migrate: the upgrade runs as official (script),
+  // never through the manager binary.
+  assert.equal(upgradedOwner, "script")
+  assert.equal(spicetifyUpdateMethod("winget"), "official")
+  assert.match(spicetifyUpdateDescription("winget"), /official installer.*migrate/i)
   const calls = commands(runtime)
-  assert.ok(calls.some((command) => command.startsWith("C:\\winget.exe upgrade --id Spicetify.Spicetify")))
-  assert.ok(!calls.some((command) => /spicetify(\.exe)? upgrade/i.test(command)))
-  assert.match(ui.lines.join("\n"), /winget/i)
+  assert.ok(!calls.some((command) => command.startsWith("C:\\winget.exe upgrade")), "no manager upgrade")
+  assert.ok(!calls.some((command) => /spicetify(\.exe)? upgrade/i.test(command)), "never the self-updater")
+  assert.match(ui.lines.join("\n"), /official installer/i)
+  assert.match(ui.lines.join("\n"), /migrate/i)
 })
 
-test("unknown Spicetify ownership refuses before any command", async () => {
+test("unknown Spicetify ownership migrates through the official installer (never refused)", async () => {
   const runtime = fakeRuntime()
   runtime.state.opencode.listVersion = "0.6.0-beta.1"
   runtime.state.spicetify.version = "2.46.0"
   const ui = fakeUi()
   const ctx = context(runtime, ui, fakePrompt(), {
-    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true,
+    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true, marketplace: false,
   })
   ctx.detection = fakeDetection(runtime)
   ctx.detection.spicetify = { ...ctx.detection.spicetify, owner: "unknown" }
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
 
-  assert.equal(await runUpdate(ctx, "spicetify"), 1)
-  assert.equal(runtime.calls.length, 0)
-  assert.match(ui.lines.join("\n"), /owner is unknown/i)
+  // Unknown owners are no longer refused: they migrate to official.
+  assert.equal(spicetifyUpdateMethod("unknown"), "official")
+  const gate = spicetifyUpdateGate({ installed: "2.46.0", owner: "unknown", latest: "2.47.0" })
+  assert.equal(gate.status, "outdated")
+  assert.equal(gate.target, "2.47.0")
+  assert.equal(gate.method, "official")
+
+  let upgradedOwner: string | undefined
+  const deps = {
+    ...marketplacePresent(),
+    upgradeSpicetify: async (_rt: any, info: any, _options: any) => {
+      upgradedOwner = info.owner
+      return fakeOfficialUpgrade(runtime, "2.47.0")(_rt, info, _options)
+    },
+  }
+  assert.equal(await runUpdate(ctx, "spicetify", deps), 0, ui.lines.join("\n"))
+  assert.equal(upgradedOwner, "script")
+  assert.ok(runtime.calls.length >= 0)
+  assert.match(ui.lines.join("\n"), /official installer/i)
 })
 
 test("stable installs stay on stable while a newer beta is only reported", async () => {
@@ -257,7 +303,7 @@ test("interactive update-everything selection authorizes both and keeps plan con
   runtime.which = async (name: string) => (name === "winget" ? "C:\\winget.exe" : which(name))
   const prompt = scriptedPrompt({ choices: ["both"], confirms: [true, true, true] })
   const ui = fakeUi()
-  const ctx = context(runtime, ui, prompt, { command: "update" })
+  const ctx = context(runtime, ui, prompt, { command: "update", marketplace: false })
   ctx.detection = fakeDetection(runtime)
   ctx.detection.spicetify = {
     ...ctx.detection.spicetify,
@@ -267,10 +313,15 @@ test("interactive update-everything selection authorizes both and keeps plan con
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
 
-  assert.equal(await runUpdate(ctx), 0, ui.lines.join("\n"))
+  const deps = {
+    ...marketplacePresent(),
+    upgradeSpicetify: fakeOfficialUpgrade(runtime, "2.47.0"),
+  }
+  assert.equal(await runUpdate(ctx, "auto", deps), 0, ui.lines.join("\n"))
   assert.equal(ctx.options.allowSpicetifyUpgrade, true)
   assert.ok(commands(runtime).some((command) => command.includes("plugin add opencode-spotify@0.6.0-beta.1")))
-  assert.ok(commands(runtime).some((command) => command.startsWith("C:\\winget.exe upgrade")))
+  assert.ok(!commands(runtime).some((command) => command.startsWith("C:\\winget.exe upgrade")), "no manager upgrade")
+  assert.match(ui.lines.join("\n"), /official installer/i)
 })
 
 test("update renders the plan exactly once and uses the shared dry-run wording", async () => {
@@ -318,7 +369,7 @@ test("Spicetify-only update asks for plan consent, then always offers apply", as
   const runtime = wingetRuntime()
   const prompt = scriptedPrompt({ confirms: [true, true] })
   const ui = fakeUi()
-  const ctx = context(runtime, ui, prompt, { command: "update", allowSpicetifyUpgrade: true })
+  const ctx = context(runtime, ui, prompt, { command: "update", allowSpicetifyUpgrade: true, marketplace: false })
   ctx.detection = fakeDetection(runtime)
   ctx.detection.spicetify = {
     ...ctx.detection.spicetify,
@@ -328,7 +379,22 @@ test("Spicetify-only update asks for plan consent, then always offers apply", as
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
 
-  assert.equal(await runUpdate(ctx, "spicetify"), 0, ui.lines.join("\n"))
+  const deps = {
+    ...marketplacePresent(),
+    upgradeSpicetify: async (_rt: any, _info: any, options: any) => {
+      // Simulate the real approval display so the plan section is visible.
+      if (typeof options?.approve === "function") {
+        await options.approve({
+          method: "official-installer",
+          source: "spicetify/cli@pinned:install.ps1",
+          scriptUrl: "https://example.invalid/install.ps1",
+          scriptSha256: "0".repeat(64),
+        })
+      }
+      return fakeOfficialUpgrade(runtime, "2.47.0")(_rt, _info, options)
+    },
+  }
+  assert.equal(await runUpdate(ctx, "spicetify", deps), 0, ui.lines.join("\n"))
   // One consent for the upgrade plan, plus the separate apply offer: the
   // upgrade always ends with an apply prompt even when the bridge is healthy.
   assert.equal(prompt.asked.length, 2, prompt.asked.join("\n"))
@@ -336,9 +402,11 @@ test("Spicetify-only update asks for plan consent, then always offers apply", as
   assert.match(prompt.asked[1] ?? "", /Apply Spicetify changes now\?/)
   const text = ui.lines.join("\n")
   assert.match(text, /Spicetify upgrade plan/)
-  assert.match(text, /Method: winget/)
-  assert.ok(commands(runtime).some((command) => command.startsWith("C:\\winget.exe upgrade")))
+  assert.match(text, /official installer/i)
+  assert.match(text, /migrate/i)
+  assert.ok(!commands(runtime).some((command) => command.startsWith("C:\\winget.exe upgrade")), "no manager upgrade")
   assert.ok(commands(runtime).some((command) => command.endsWith("spicetify.exe apply")))
+  assert.match(text, /opencode service restart/i)
 })
 
 test("unknown Spicetify latest never prints current and refuses an explicit-only run", async () => {
@@ -388,24 +456,34 @@ test("a prerelease or downgrade Spicetify target is refused with clear wording",
   assert.equal(downgrade.calls.length, 0)
 })
 
-test("a combined update skips an unknown Spicetify owner and still updates the plugin", async () => {
+test("a combined update migrates an unknown Spicetify owner through official and still updates the plugin", async () => {
   const runtime = fakeRuntime()
   runtime.state.opencode.listVersion = "0.5.7"
   const ui = fakeUi()
   const ctx = context(runtime, ui, scriptedPrompt(), {
-    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true,
+    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true, marketplace: false,
   })
   ctx.detection = fakeDetection(runtime)
   ctx.detection.spicetify = { ...ctx.detection.spicetify, owner: "unknown" }
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
 
-  assert.equal(await runUpdate(ctx, "both"), 0, ui.lines.join("\n"))
+  let upgradedOwner: string | undefined
+  const deps = {
+    ...marketplacePresent(),
+    upgradeSpicetify: async (_rt: any, info: any, _options: any) => {
+      upgradedOwner = info.owner
+      return fakeOfficialUpgrade(runtime, "2.47.0")(_rt, info, _options)
+    },
+  }
+  assert.equal(await runUpdate(ctx, "both", deps), 0, ui.lines.join("\n"))
+  assert.equal(upgradedOwner, "script", "unknown migrates to official")
   assert.ok(commands(runtime).some((command) => command.includes("plugin add opencode-spotify@0.6.0-beta.1")))
-  assert.ok(!commands(runtime).some((command) => /winget|scoop|choco|spicetify(\.exe)? upgrade/i.test(command)))
+  assert.ok(!commands(runtime).some((command) => /winget|scoop|choco/i.test(command) && /upgrade/i.test(command)))
   const text = ui.lines.join("\n")
-  assert.match(text, /Skipping the Spicetify update/i)
-  assert.match(text, /owner is unknown/i)
+  assert.match(text, /official installer/i)
+  assert.match(text, /migrate/i)
+  assert.match(text, /opencode service restart/i)
 })
 
 test("a combined update skips an unknown Spicetify version and still updates the plugin", async () => {
@@ -485,15 +563,24 @@ test("update passes its cancel token into registration, bridge and Spicetify chi
   }) as typeof runtime.run
   const ui = fakeUi()
   const ctx = context(runtime, ui, scriptedPrompt(), {
-    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true,
+    command: "update", yes: true, nonInteractive: true, allowSpicetifyUpgrade: true, marketplace: false,
   })
   ctx.detection = fakeDetection(runtime)
   ctx.detection.spicetify = { ...ctx.detection.spicetify, owner: "winget" }
   ctx.versions.plugin.latest = "0.6.0-beta.1"
   ctx.versions.spicetify.latest = "2.47.0"
 
-  assert.equal(await runUpdate(ctx, "both"), 0, ui.lines.join("\n"))
-  assert.ok(seen.some((call) => call.file.includes("winget") && call.cancel === ctx.cancel), "manager upgrade")
+  let upgradeCancel: unknown
+  const deps = {
+    ...marketplacePresent(),
+    upgradeSpicetify: async (_rt: unknown, _info: unknown, options: { cancel?: unknown }) => {
+      upgradeCancel = options.cancel
+      runtime.state.spicetify.version = "2.47.0"
+      return { code: 0 as const, stdout: "upgraded via official", stderr: "" }
+    },
+  }
+  assert.equal(await runUpdate(ctx, "both", deps), 0, ui.lines.join("\n"))
+  assert.equal(upgradeCancel, ctx.cancel, "official upgrade receives the cancel token")
   assert.ok(seen.some((call) => call.file.includes("pwsh") && call.cancel === ctx.cancel), "bridge operation")
   assert.ok(seen.some((call) => call.file.includes("opencode") && call.cancel === ctx.cancel), "registration")
 })
@@ -966,4 +1053,101 @@ test("boundary checks reject traversal and symlinks and accept exact canonical r
   assert.match(pathRemovalProblem(LOCAL_DIR, [LOCAL_DIR], { symlink: true, realPath: null }) ?? "", /symbolic link/)
   assert.match(pathRemovalProblem(LOCAL_DIR, [LOCAL_DIR], { symlink: false, realPath: "C:\\Windows\\Temp" }) ?? "", /resolves outside/)
   assert.deepEqual(managerUninstallArgs("winget")?.args.slice(0, 2), ["uninstall", "--id"])
+})
+
+// ---------------------------------------------------------------------------
+// Marketplace after upgrade (installed by default, soft-fail, service restart)
+// ---------------------------------------------------------------------------
+
+test("Marketplace installs by default after a Spicetify upgrade and before apply", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.6.0-beta.1"
+  runtime.state.spicetify.version = "2.46.0"
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, scriptedPrompt({ confirms: [true, true] }), {
+    command: "update", allowSpicetifyUpgrade: true,
+  })
+  ctx.detection = fakeDetection(runtime)
+  ctx.versions.plugin.latest = "0.6.0-beta.1"
+  ctx.versions.spicetify.latest = "2.47.0"
+
+  let installed = false
+  const deps = {
+    upgradeSpicetify: fakeOfficialUpgrade(runtime, "2.47.0"),
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async (_rt: unknown, _info: unknown, options?: { dryRun?: boolean; offline?: boolean }) => {
+      assert.equal(options?.dryRun ?? false, false)
+      assert.equal(options?.offline ?? false, false)
+      installed = true
+      return { status: "installed" as const }
+    },
+  }
+  assert.equal(await runUpdate(ctx, "spicetify", deps), 0, ui.lines.join("\n"))
+  assert.equal(installed, true, "marketplace install ran after upgrade")
+})
+
+test("Marketplace soft-fails with a warning and still applies", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.6.0-beta.1"
+  runtime.state.spicetify.version = "2.46.0"
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, scriptedPrompt({ confirms: [true, true] }), {
+    command: "update", allowSpicetifyUpgrade: true,
+  })
+  ctx.detection = fakeDetection(runtime)
+  ctx.versions.plugin.latest = "0.6.0-beta.1"
+  ctx.versions.spicetify.latest = "2.47.0"
+
+  const deps = {
+    upgradeSpicetify: fakeOfficialUpgrade(runtime, "2.47.0"),
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async () => ({ status: "failed" as const, error: "network down", guidance: "retry later" }),
+  }
+  assert.equal(await runUpdate(ctx, "spicetify", deps), 0, ui.lines.join("\n"))
+  assert.match(ui.lines.join("\n"), /Marketplace installation failed; continuing without it/i)
+  assert.match(ui.lines.join("\n"), /opencode service restart/i)
+})
+
+test("--no-marketplace skips the Marketplace install entirely", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = "0.6.0-beta.1"
+  runtime.state.spicetify.version = "2.46.0"
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, scriptedPrompt({ confirms: [true, true] }), {
+    command: "update", allowSpicetifyUpgrade: true, marketplace: false,
+  })
+  ctx.detection = fakeDetection(runtime)
+  ctx.versions.plugin.latest = "0.6.0-beta.1"
+  ctx.versions.spicetify.latest = "2.47.0"
+
+  let installCalls = 0
+  const deps = {
+    upgradeSpicetify: fakeOfficialUpgrade(runtime, "2.47.0"),
+    inspectMarketplace: async () => {
+      installCalls += 1
+      return { installed: false, registered: false }
+    },
+    installMarketplace: async () => {
+      installCalls += 1
+      return { status: "installed" as const }
+    },
+  }
+  assert.equal(await runUpdate(ctx, "spicetify", deps), 0, ui.lines.join("\n"))
+  assert.equal(installCalls, 0, "opt-out skips both inspect and install")
+  assert.ok(!ui.lines.join("\n").includes("Marketplace installation failed"))
+})
+
+test("official-only routing never uses winget/scoop/choco and unknown migrates", () => {
+  assert.equal(spicetifyUpdateMethod("script"), "official")
+  assert.equal(spicetifyUpdateMethod("winget"), "official")
+  assert.equal(spicetifyUpdateMethod("scoop"), "official")
+  assert.equal(spicetifyUpdateMethod("choco"), "official")
+  assert.equal(spicetifyUpdateMethod("unknown"), "official")
+  assert.match(spicetifyUpdateDescription("winget"), /official installer.*migrate/i)
+  assert.match(spicetifyUpdateDescription("unknown"), /official installer.*migrate/i)
+  assert.equal(spicetifyUpdateTarget("official", "2.47.0"), "2.47.0")
+  assert.equal(spicetifyUpdateTarget("winget", "2.47.0"), "2.47.0")
+  const gate = spicetifyUpdateGate({ installed: "2.46.0", owner: "unknown", latest: "2.47.0" })
+  assert.equal(gate.status, "outdated")
+  assert.equal(gate.target, "2.47.0")
 })

@@ -276,8 +276,10 @@ export function updateLabel(update: AvailableUpdate): string {
 
 /**
  * Ownership label for the Spicetify copy that is installed. This is a
- * classification only: diagnostics tell users to keep using the method that
- * owns the copy, never to mix package managers or run a Winget command.
+ * classification only: diagnostics route every Spicetify update through the
+ * official installer (`opencode-spotify update`), which upgrades each copy by
+ * its owner-safe route — never by mixing package managers or running a
+ * Winget/scoop/choco command from diagnostics.
  */
 export function ownershipLabel(owner: InstallOwner): string {
   switch (owner) {

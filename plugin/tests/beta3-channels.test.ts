@@ -8,7 +8,9 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { applyBridge } from "../src/cli/bridge.ts"
 import { describePluginUpdate, resolvePluginChannels, selectPluginTarget } from "../src/cli/update-plan.ts"
-import { resolveChannelLabels, runStatus } from "../src/cli/status.ts"
+import { resolveChannelLabels, runStatus, type StatusReport } from "../src/cli/status.ts"
+import { runDoctor } from "../src/cli/doctor.ts"
+import { createCancelToken } from "../src/cli/cancel.ts"
 import { runUpdate } from "../src/cli/update.ts"
 import { ensureSpicetify } from "../src/cli/setup.ts"
 import { main } from "../src/cli/main.ts"
@@ -274,6 +276,55 @@ test("B24 failed backup reports without claiming verification", async () => {
   const text = progress.join("\n")
   assert.match(text, /backup not found/i)
   assert.ok(!/Spicetify apply completed/i.test(text), "no success verification on failure")
+})
+
+// ---------------------------------------------------------------------------
+// Agent-3: Marketplace surfacing stays channel-, offline-, and cancel-safe.
+// ---------------------------------------------------------------------------
+
+test("Agent-3 marketplace block is additive to channel verdicts and offline-safe", async () => {
+  const runtime = fakeRuntime()
+  const baseExists = runtime.exists.bind(runtime)
+  runtime.exists = (path: string) => (/marketplace/i.test(path) ? true : baseExists(path))
+  const baseIsFile = runtime.isFile.bind(runtime)
+  runtime.isFile = (path: string) => (/marketplace/i.test(path) ? true : baseIsFile(path))
+  const ui = fakeUi()
+  const ctx = context(
+    runtime,
+    ui,
+    fakePrompt(),
+    { command: "status", json: true, offline: true },
+    { plugin: { latest: "0.5.7", latestBeta: "0.6.0-beta.2" }, spicetify: { latest: null } },
+  )
+  ctx.detection = fakeDetection(runtime)
+  assert.equal(await runStatus(ctx), 0)
+  const report = ui.jsonValue as StatusReport
+  // Marketplace is files-only observation: present without registration here.
+  assert.deepEqual(report.marketplace, { installed: true, registered: false })
+  // Channel verdicts are untouched by the additive block.
+  assert.equal(report.updates.plugin.status, "outdated")
+  assert.equal(report.updates.plugin.available, true)
+  assert.deepEqual(runtime.calls, [], "offline status with Marketplace present runs nothing")
+})
+
+test("Agent-3 diagnostics report Marketplace even when cancellation was requested", async () => {
+  const runtime = fakeRuntime()
+  const ui = fakeUi()
+  const token = createCancelToken()
+  token.request("user")
+  const ctx = context(runtime, ui, fakePrompt(), { command: "status", json: true }, undefined, undefined, token)
+  ctx.detection = fakeDetection(runtime)
+  // The sync read-only observation does not consult the cancel token.
+  assert.equal(await runStatus(ctx), 0)
+  const report = ui.jsonValue as StatusReport
+  assert.deepEqual(report.marketplace, { installed: false, registered: false })
+
+  const doctorUi = fakeUi()
+  const doctorCtx = context(runtime, doctorUi, fakePrompt(), { command: "doctor", json: true })
+  doctorCtx.detection = fakeDetection(runtime)
+  assert.equal(await runDoctor(doctorCtx), 0)
+  const doctor = doctorUi.jsonValue as { environment: { marketplace: { installed: boolean; registered: boolean } } }
+  assert.deepEqual(doctor.environment.marketplace, { installed: false, registered: false })
 })
 
 

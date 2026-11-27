@@ -68,6 +68,8 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.tool.outputs.node }}
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -114,6 +116,7 @@ jobs:
         run: npm audit --audit-level=high
 
       - name: Verify test accounting
+        if: matrix.lane == 'floor-engines'
         working-directory: plugin
         run: node scripts/check-test-accounting.mjs
 

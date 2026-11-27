@@ -2,6 +2,7 @@ import { BRIDGE_PORT, MIN_OPENCODE, MIN_SPICETIFY, compareVersions, isAtLeast } 
 import { inspectInstallerLock, installerLockPath } from "./lock.ts"
 import { projectPlugins } from "./opencode.ts"
 import { compatibilityLabel, isSpotifyPluginId } from "./plan.ts"
+import { readMarketplaceStatus, type MarketplaceStatus } from "./status.ts"
 import { pluginAvailableUpdate } from "./update-plan.ts"
 import {
   availableUpdate,
@@ -84,6 +85,7 @@ export interface DoctorEnvironment {
     protocol: number
     origins: number
   }
+  marketplace: MarketplaceStatus
   port: DoctorPortInfo
   lock: DoctorLockInfo
   updates: { plugin: AvailableUpdate; spicetify: AvailableUpdate }
@@ -212,6 +214,7 @@ export async function doctorEnvironment(ctx: OperationContext): Promise<DoctorEn
       protocol: d.bridge.protocol,
       origins: d.bridge.origins,
     },
+    marketplace: readMarketplaceStatus(ctx.runtime, d.spicetify),
     port: doctorPort(ctx),
     lock,
     updates: {
@@ -316,7 +319,14 @@ export async function doctorChecks(ctx: OperationContext): Promise<DoctorCheck[]
   if (d.spicetify.available) {
     add("spicetify-version", isAtLeast(d.spicetify.version, MIN_SPICETIFY) === false ? "warn" : "ok",
       `Spicetify ${d.spicetify.version ?? "version unknown"}; minimum ${MIN_SPICETIFY}`,
-      isAtLeast(d.spicetify.version, MIN_SPICETIFY) === false ? `Update with the method that owns this copy (${ownershipLabel(d.spicetify.owner)}); do not mix package managers.` : undefined)
+      isAtLeast(d.spicetify.version, MIN_SPICETIFY) === false ? "Run `opencode-spotify update` (official installer)." : undefined)
+    // Legacy manager copies are never updated by hand-mixing package managers:
+    // the official installer is the single supported route forward.
+    if (d.spicetify.owner === "winget" || d.spicetify.owner === "scoop" || d.spicetify.owner === "choco") {
+      add("spicetify-manager", "info",
+        `Spicetify sits on a legacy manager path (${ownershipLabel(d.spicetify.owner)} at ${d.spicetify.path ?? "unknown path"}).`,
+        "Run `opencode-spotify update` (official installer) to migrate to the latest official release.")
+    }
     add("spicetify-config", d.spicetify.configPath ? "ok" : "warn",
       d.spicetify.configPath ? `Config: ${d.spicetify.configPath}` : "Spicetify configuration not located",
       d.spicetify.configPath ? undefined : "Run `spicetify -c` and confirm Spotify/Spicetify are configured.")
@@ -337,6 +347,19 @@ export async function doctorChecks(ctx: OperationContext): Promise<DoctorCheck[]
   add("bridge", d.compatibility.bridge === "compatible" ? "ok" : d.compatibility.bridge === "missing" ? "warn" : "warn",
     `Bridge: ${compatibilityLabel(d.compatibility.bridge)}`,
     d.compatibility.bridge === "compatible" ? undefined : "Run `opencode-spotify repair` (official installer) to synchronize the extension with this package.")
+
+  // Marketplace presence is third-party state, never a failure: this
+  // installer deliberately removes the Marketplace step, so it can only ever
+  // observe Marketplace, never install or change it.
+  const marketplace = readMarketplaceStatus(ctx.runtime, d.spicetify)
+  if (marketplace.installed) {
+    add("marketplace", "info",
+      marketplace.registered
+        ? "Spicetify Marketplace is installed and registered (third-party; not managed by this installer)."
+        : "Spicetify Marketplace files are installed but not registered in the Spicetify configuration (third-party; not managed by this installer).")
+  } else {
+    add("marketplace", "info", "Spicetify Marketplace is not installed (this installer never installs it).")
+  }
 
   const port = doctorPort(ctx)
   if (port.busy) {

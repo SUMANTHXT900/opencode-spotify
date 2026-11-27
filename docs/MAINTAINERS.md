@@ -18,7 +18,7 @@ npm release process. For the bridge protocol and TUI design see
 - [Update policy](#update-policy)
 - [Backup and recovery](#backup-and-recovery)
 - [Local tarball verification](#local-tarball-verification)
-- [npm release: prepare, then publish](#npm-release-prepare-then-publish)
+- [npm release: tag, verify, publish](#npm-release-tag-verify-publish)
 - [Trusted publishing setup](#trusted-publishing-setup)
 - [Repository settings](#repository-settings)
 
@@ -32,21 +32,25 @@ pushes to `main`, manual dispatch, and release preparation:
 | Static checks and unit tests | Locked install, actionlint, release and compatibility policy tests, typecheck, test accounting, bridge syntax, high/critical dependency audit, Node tests |
 | Rendering and package verification | Locked install, Bun-native rendering and state, persistent VT, one isolated package build/install/verification |
 
-Both jobs use reviewed Node 24.12.0 and the lockfile-keyed npm **download** cache;
-only the native job needs Bun 1.3.14. Each installs its own `node_modules` with
-lifecycle scripts disabled. There is no installed-tree handoff. The jobs always
-report checks, including on docs or workflow-only changes, so a path filter cannot
-leave a required check pending. Repository required-check settings have not been
-verified.
+Both jobs use reviewed Node 24.12.0 and the lockfile-keyed npm **download** cache
+(`--prefer-offline`); only the native job needs Bun 1.3.14. Each installs its
+own `node_modules` with lifecycle scripts disabled. There is no installed-tree
+handoff. The jobs always report checks, including on docs or workflow-only
+changes, so a path filter cannot leave a required check pending. Repository
+required-check settings have not been verified.
 
 Two runners keep static feedback independent of the native/package critical path. A
 single runner would save the second checkout and npm install while putting static
 checks on that path. A third runner would repeat setup again. Revisit the choice
-after comparable hosted timings.
+after comparable hosted timings. The static job consolidates the sub-second
+gates into one step (typecheck, bridge syntax, test accounting, release-policy
+tests, compatibility selftest, actionlint with a cached binary) so fewer runner
+slots are held with the same coverage. Tag pushes are never cancelled mid-run
+(`cancel-in-progress` excludes tags); other non-`main` refs still cancel.
 
-Release preparation calls these same gates and uploads the exact verified bytes and
-digests. The separately authorized publication phase uses the earlier successful
-preparation artifact and does not compile or pack.
+A tag release calls these same gates and uploads the exact verified bytes and
+digests as the `release-candidate` artifact. The publish phase downloads that
+artifact from the same run and does not compile or pack.
 
 ## Test buckets and accounting
 
@@ -191,11 +195,18 @@ Yes**; the Yes branch downloads a second installer from the mutable
 `Invoke-Expression`; that nested script is neither pinned nor hashed by the
 upstream installer.
 
-`opencode-spotify` does not install, manage, or claim Marketplace. It therefore
-replaces exactly that region with comments. Everything else — the existing-install
-prompt, the optional `spicetify update`, legacy-folder handling, the release
-download/extraction, user-PATH update, and the final message — is kept
-byte-identical.
+`opencode-spotify` keeps the executed upstream script Marketplace-free: it
+replaces exactly that region with comments, so no Marketplace prompt, URL,
+download, or evaluation exists in the executed bytes. Everything else — the
+existing-install prompt, the optional `spicetify update`, legacy-folder handling,
+the release download/extraction, user-PATH update, and the final message — is kept
+byte-identical. The adapter then installs the Marketplace itself, deterministically
+and by default, from the latest `spicetify-marketplace` release zip (bounded
+download, traversal-rejected extraction into
+`%APPDATA%\spicetify\CustomApps\marketplace`, registered via `spicetify config`;
+`inspectMarketplace` is read-only, failures warn without failing core setup).
+Passing `--no-marketplace` skips that install. The Marketplace is therefore an
+explicitly claimed adapter component — never fetched through the upstream script.
 
 ### Byte map
 
@@ -424,10 +435,12 @@ never executes an unpinned script:
   without retroactively calling the installed one latest. Unknown, prerelease,
   rate-limited, or offline lookups hide update offers; they never substitute a
   version.
-- **Existing install:** winget/scoop/Chocolatey copies are upgraded/removed only
-  through that manager. A script-owned copy uses the same pinned official
-  installer. Unknown ownership is refused with manual guidance. A fresh install
-  refuses to overlay any existing copy.
+- **Existing install:** every owner — script, winget, scoop, Chocolatey —
+  migrates through the same pinned official installer on update (legacy-to-
+  official migration; no second copy, no manager mixing). Manager copies are
+  removed only through their manager on uninstall. Unknown ownership is refused
+  with manual guidance on install/update and disclosed (never deleted) on
+  uninstall. A fresh install refuses to overlay any existing copy.
 - **Manual path:** prints the pinned installer URL/hash, the resolved target (or
   "not resolved"), the asset name/URL, and the official docs; it downloads and
   executes nothing.
@@ -543,23 +556,25 @@ without replaying the whole run.
 
 ### Maintenance menu
 
-Re-running `setup` on an existing installation opens an adaptive menu: update both /
-update plugin only / update Spicetify only (each only when that target is genuinely
-achievable); Repair (always available, including for a local registration); Uninstall
-(when a registration exists); Status + diagnostics, Continue, Exit. It never shows
-an inapplicable action and never downgrades. Update entries are suppressed when the
-registry tag is older, unknown, a prerelease being compared to stable, or when the
-owner has no safe target. A Spicetify approval is collected **once** for the chosen
-action; the plan's steps are described before consent and the same approval is not
-requested again for the content-changing step. A local-path registration offers
-"Switch this global registration to the published package" and is never replaced
-implicitly.
+Re-running `setup` on an existing installation opens an adaptive menu: Update to
+latest (a single entry, only when an update is genuinely achievable — the handler
+maps it to the achievable backend target); Repair installation (always available,
+including for a local registration); Uninstall (when a registration exists);
+Exit. It never shows an inapplicable action and never downgrades. The update entry
+is suppressed when the registry tag is older, unknown, a prerelease being compared
+to stable, or when the owner has no safe target. A Spicetify approval is collected
+**once** for the chosen action; the plan's steps are described before consent and
+the same approval is not requested again for the content-changing step. A local-path
+registration offers "Switch this global registration to the published package" and
+is never replaced implicitly.
 
 ### Ownership
 
 Spicetify ownership is classified as `script` (official installer under
 `%LOCALAPPDATA%\spicetify`), `winget`, `scoop`, `choco`, or `unknown`. Upgrade:
-`script` → pinned official installer; manager → that manager; `unknown` → refuse.
+every known owner migrates through the pinned official installer (legacy manager
+copies become official copies; no second copy, no manager mixing); `unknown` →
+refuse.
 Uninstall: `script` → validated local directory plus exact PATH entries; manager →
 manager uninstall; `unknown` → disclose manual steps, never delete.
 `status`/`doctor` display the owner and the owner-safe command. Package managers are
@@ -676,57 +691,59 @@ verifier's inputs and integrity logic without running another full install.
 Prebuilt-tarball mode is trusted-input-only: it installs and executes the supplied
 bytes.
 
-## npm release: prepare, then publish
+## npm release: tag, verify, publish
 
-1. Review the exact commit on `main` or a `release/*` branch. Dispatch `release.yml`
-   in preparation mode (empty `prepare_run_id`, `confirm=PREPARE`), using the manifest version and its
-   `dist_tag` (`beta` or `latest`). Both mandatory Windows jobs must pass.
-2. Download the successful run's candidate artifact. Save its run ID, `proof.json`,
-   tarball and digest files. Check the source commit, package version, SHA-256 and
-   npm SHA-512 integrity before running the developer physical QA in
-   [RELEASE_QA.md](RELEASE_QA.md) on that tarball.
-3. After physical QA and explicit publication authorization, dispatch `release.yml`
-   with `confirm=PUBLISH`, that `prepare_run_id`, `source_sha`, `source_branch`,
-   `expected_sha256`, `expected_sha512`, version and `dist_tag`. The workflow verifies
-   the prepared run and both hashes, then publishes those bytes after `npm-release`
-   approval. It checks registry integrity and the selected dist-tag. There is no
-   rebuild between QA and publication.
-4. Use `beta` for prereleases and leave `latest` as it was. Stable has its own
-   preparation run and physical QA because it is a different tarball.
+Push a version tag and the workflow publishes exactly what CI verified:
 
-`opencode-spotify` already exists on npm. The first manual publication and the
+1. Set `plugin/package.json` to the release version, then push tag `vX.Y.Z`
+   for stable or `vX.Y.Z-beta.N` for a prerelease. The `validate` job derives
+   the version and dist-tag from the tag itself (`tag-release` mode: stable →
+   `latest`, prerelease → `beta`) and refuses any tag/manifest mismatch.
+2. The `verify` job runs the reusable CI workflow with
+   `retain_release_candidate: true`: both mandatory Windows jobs must pass, and
+   the single full `verify-package` gate uploads the exact tarball plus
+   sidecars and `proof.json` as the `release-candidate` artifact.
+3. The `publish` job (environment `npm-release`) downloads only that artifact,
+   rechecks both digests plus proof source/run/repository binding, performs a
+   single `npm view opencode-spotify --json` read (fail closed on duplicate
+   version, strict-SemVer dist-tag monotonicity preflight), publishes the exact
+   downloaded bytes with `--provenance`, verifies registry integrity and the
+   intended tag, then creates/updates the GitHub Release for the tag with the
+   verified `.tgz`/`.sha256`/`.integrity` attached (`--prerelease` for beta).
+   There is no rebuild between verification and publication.
+
+Run the developer physical QA in [RELEASE_QA.md](RELEASE_QA.md) against the
+tagged commit (or the release-candidate tarball from the tag run) before
+pushing a stable tag. Use `beta` for prereleases; a stable release is a
+different tarball with its own tag run. The first manual publication and the
 first-package `latest` bootstrap behavior are historical.
 
 ## Trusted publishing setup
 
-> Pending — the workflow stays inactive until all of this is done.
+No tokens: publishing authenticates with short-lived OIDC. The trusted
+publisher on the npm package must read exactly:
 
-- On the npm package: add this repository as a **trusted publisher** (GitHub
-  Actions OIDC). This requires the package to exist already. No `NPM_TOKEN` exists
-  and none is accepted by the workflow.
-- In GitHub: create the `npm-release` environment with required reviewers where the
-  account plan allows it (branch restriction to `main` recommended). GitHub may
-  auto-create an unprotected environment if it does not exist, so the repository
-  variable below is the load-bearing kill switch.
-- Set the repository Actions variable `NPM_PUBLISH_ENABLED` to exactly `true`
-  (Settings → Variables → Actions). Without it the publish validation fails closed
-  (after any required environment approval); leave it unset until the activation
-  prerequisites above are verified.
+| npm trusted-publisher field | Value |
+|---|---|
+| Organization or user | `SUMANTHXT900` (repository `SUMANTHXT900/opencode-spotify`) |
+| Workflow file name | `release.yml` |
+| Environment name | `npm-release` |
+
+- On the npm package: this repository is registered as a **trusted publisher**
+  (GitHub Actions OIDC) with the values above. No `NPM_TOKEN` exists and none
+  is accepted by the workflow.
+- In GitHub: the `npm-release` environment carries the required reviewers
+  (branch restriction to tags recommended). The environment is the load-bearing
+  approval gate.
 - OIDC needs npm ≥ 11.5.1. The publish job sets up Node 24.12.0 via pinned
-  `setup-node` (bundled npm 11.6.2).
+  `setup-node` (bundled npm 11.6.2) and fails closed on anything older — no
+  upgrade is attempted in the mint-token job.
 - Trusted-publisher configurations created after Sep 2026 default to stage-only
   publishing; explicitly allow direct `npm publish`. A new configuration must
   complete its first successful publish within two days.
-- Confirm the environment reviewers and branch restrictions, trusted publisher, and
-  repository variable before authorizing a publish dispatch. Repository-side
-  activation settings are not verified by this project.
-
-Private-repository caveat: this repository is currently private. npm does not
-support provenance for publishes originating from a private repository, so the
-release workflow omits `--provenance` while private. Trusted publishing itself
-works from a private repository, but the npm "repository" link will not be publicly
-viewable and no public provenance badge appears. Do not make the repository public
-without separate approval. Revisit this section when visibility changes.
+- Confirm the environment reviewers, trusted publisher, and workflow pin before
+  pushing a release tag. Repository-side activation settings are not verified
+  by this project.
 
 ## Repository settings
 
@@ -738,8 +755,8 @@ applied by automation — apply them in the GitHub UI):
   disable force pushes. Verify the exact check names in GitHub.
 - Secret scanning + push protection on; Dependabot on (config added as
   `.github/dependabot.yml`: npm + actions, weekly).
-- Fork PR workflows unprivileged; release stays manual (`workflow_dispatch`,
-  `npm-release` environment reviewers, `main`-only rule).
+- Fork PR workflows unprivileged; release stays tag-gated (tag push,
+  `npm-release` environment reviewers).
 - No hardcoded production secrets, tokens, private keys, or credential files in
   tracked files or reachable history (only the placeholder
   `__OPENCODE_SPOTIFY_SECRET__`, two documented Spotify hashes, and the words

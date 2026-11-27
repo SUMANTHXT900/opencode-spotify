@@ -1,6 +1,8 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
+  achievableSpicetifyTarget,
+  ensureMarketplace,
   ensureSpicetify,
   resolvedSpicetifyTarget,
   runSetup,
@@ -774,4 +776,109 @@ test("maintenance update keeps a real failure (1) when cancellation is requested
   }) as typeof runtime.run
 
   assert.equal(await runSetup(ctx), 1, ui.lines.join("\n"))
+})
+
+// ---------------------------------------------------------------------------
+// Marketplace default + official-only Spicetify (Phase-2 Agent 2)
+// ---------------------------------------------------------------------------
+
+test("achievableSpicetifyTarget covers unknown owners via the official installer", () => {
+  assert.equal(achievableSpicetifyTarget("unknown", TEST_LATEST), TEST_LATEST)
+  assert.equal(achievableSpicetifyTarget("winget", TEST_LATEST), TEST_LATEST)
+  assert.equal(achievableSpicetifyTarget("script", TEST_LATEST), TEST_LATEST)
+  assert.equal(achievableSpicetifyTarget("unknown", "2.47.0-beta.1"), null)
+  assert.equal(achievableSpicetifyTarget("unknown", null), null)
+})
+
+test("ensureMarketplace installs by default, skips with --no-marketplace, and soft-fails", async () => {
+  const present = fakeRuntime()
+  const presentCtx = context(present, fakeUi(), fakePrompt(), { command: "setup" })
+  presentCtx.detection = fakeDetection(present)
+  let installed = false
+  await ensureMarketplace(presentCtx, {
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async () => {
+      installed = true
+      return { status: "installed" }
+    },
+  })
+  assert.equal(installed, true)
+
+  const skipped = fakeRuntime()
+  const skippedCtx = context(skipped, fakeUi(), fakePrompt(), { command: "setup", marketplace: false })
+  skippedCtx.detection = fakeDetection(skipped)
+  let calls = 0
+  await ensureMarketplace(skippedCtx, {
+    inspectMarketplace: async () => {
+      calls += 1
+      return { installed: false, registered: false }
+    },
+    installMarketplace: async () => {
+      calls += 1
+      return { status: "installed" }
+    },
+  })
+  assert.equal(calls, 0, "--no-marketplace skips both inspect and install")
+
+  const failing = fakeRuntime()
+  const failingUi = fakeUi()
+  const failingCtx = context(failing, failingUi, fakePrompt(), { command: "setup" })
+  failingCtx.detection = fakeDetection(failing)
+  await ensureMarketplace(failingCtx, {
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async () => ({ status: "failed" as const, error: "network down" }),
+  })
+  assert.match(failingUi.lines.join("\n"), /Marketplace installation failed; continuing without it/i)
+
+  const dry = fakeRuntime()
+  const dryCtx = context(dry, fakeUi(), fakePrompt(), { command: "setup", dryRun: true })
+  dryCtx.detection = fakeDetection(dry)
+  let seen: { dryRun?: boolean; offline?: boolean } | undefined
+  await ensureMarketplace(dryCtx, {
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async (_rt, _info, options) => {
+      seen = { dryRun: options?.dryRun, offline: options?.offline }
+      return { status: "dry-run" as const }
+    },
+  })
+  assert.equal(seen?.dryRun, true, "dryRun flows through")
+})
+
+test("fresh setup dry-run mentions the Marketplace default", async () => {
+  const runtime = officialRuntime()
+  const { ctx, ui } = setupContext(runtime, { spicetify: "auto", dryRun: true })
+  assert.equal(await runSetup(ctx), 0)
+  assert.match(ui.lines.join("\n"), /Marketplace.*--no-marketplace/i)
+})
+
+test("maintenance offers the single update for unknown-owner Spicetify via official", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.spicetify.version = "2.46.7"
+  const { ctx, capture } = menuContext(runtime, "exit", {
+    pluginInstalled: "0.6.0",
+    pluginLatest: "0.6.0",
+    spicetifyInstalled: "2.46.7",
+    spicetifyLatest: "2.47.0",
+  })
+  ctx.detection.spicetify = { ...ctx.detection.spicetify, owner: "unknown" }
+  assert.equal(await runSetup(ctx), 0)
+  const labels = (capture.labels[0] ?? []).join("\n")
+  assert.match(labels, /Update to latest.*2\.46\.7 -> 2\.47\.0/, "unknown owner still offers official update")
+})
+
+test("fresh setup prints the service-restart guidance and installs Marketplace by default", async () => {
+  const runtime = fakeRuntime()
+  runtime.state.opencode.listVersion = null
+  runtime.state.bridge.installed = false
+  runtime.state.bridge.extensionCurrent = false
+  runtime.state.spicetify.registered = false
+  const ui = fakeUi()
+  const ctx = context(runtime, ui, fakePrompt({ confirms: [true, false] }), { command: "setup", yes: false })
+  ctx.detection = fakeDetection(runtime)
+  const deps: EnsureSpicetifyDeps = {
+    inspectMarketplace: async () => ({ installed: false, registered: false }),
+    installMarketplace: async () => ({ status: "installed" as const }),
+  }
+  assert.equal(await runSetup(ctx, deps), 0, ui.lines.join("\n"))
+  assert.match(ui.lines.join("\n"), /opencode service restart/i)
 })

@@ -12,6 +12,7 @@ import {
   renderUpdateOverview,
   renderUpdatePlan,
   renderUpdateScreen,
+  renderUpdateSelection,
   renderUpdateSummary,
   spicetifyAvailabilityLine,
   spicetifyOwnerCategory,
@@ -311,7 +312,7 @@ test("readiness reports current, update-available, and required bridge repair", 
     plugin: { status: "current", target: null, installed: "0.6.0" },
     spicetify: { status: "outdated", owner: "unknown" },
   }))
-  assert.equal(unknownOwnerOnly.spicetifyUpdateAvailable, false, "unknown owners are never auto-upgraded")
+  assert.equal(unknownOwnerOnly.spicetifyUpdateAvailable, true, "unknown owners migrate through official")
 
   const staleBridge = updateReadiness(model({ plugin: { status: "current", target: null }, bridge: { installed: true, registration: "stale" } }))
   assert.equal(staleBridge.status, "current")
@@ -354,18 +355,18 @@ test("selection exposes valid choices and labels authorization plus the Spicetif
   assert.match(choices[0]!.label, /Update OpenCode Spotify and Spicetify/)
   assert.match(choices[0]!.label, /combined authorization required/)
   assert.match(choices[1]!.label, /Update OpenCode Spotify only \(0\.5\.7 -> 0\.6\.0\)/)
-  assert.match(choices[2]!.label, /via winget; separate confirmation required/)
+  assert.match(choices[2]!.label, /via official installer; separate confirmation required/)
 
   choices = updateSelectionChoices(model(), { allowSpicetifyUpgrade: true })
   assert.deepEqual(choices.map((choice) => choice.value), ["both", "plugin", "spicetify", "cancel"])
-  assert.match(choices[0]!.label, /Spicetify 2\.46\.7 -> 2\.47\.0 via winget/)
+  assert.match(choices[0]!.label, /Spicetify 2\.46\.7 -> 2\.47\.0 via official installer/)
   assert.doesNotMatch(choices[0]!.label, /authorization required/)
   assert.doesNotMatch(choices[2]!.label, /separate confirmation required/)
 
   const unknownOwner = model({ spicetify: { owner: "unknown" } })
   assert.deepEqual(
     updateSelectionChoices(unknownOwner, { allowSpicetifyUpgrade: true }).map((choice) => choice.value),
-    ["plugin", "cancel"],
+    ["both", "plugin", "spicetify", "cancel"],
   )
 
   const onlySpicetify = model({ plugin: { status: "current", target: null } })
@@ -523,45 +524,31 @@ test("plan confirmation forwards question options and presentUpdatePlan reports 
 // Owner-specific Spicetify guidance
 // ---------------------------------------------------------------------------
 
-test("Spicetify guidance adapts to official, manager, and unknown owners", () => {
-  const official = spicetifyUpdateGuidance("script")
-  assert.equal(official.category, "official")
-  assert.equal(official.command, "spicetify-cli upgrade")
-  assert.ok(official.lines.some((line) => line.includes(SPICETIFY_MANUAL_URL)))
-  assert.ok(official.lines.some((line) => line.includes("do not also run winget, Scoop, or Chocolatey")))
-
-  const verified = spicetifyUpdateGuidance("script", { verifiedInstall: true })
-  assert.equal(verified.category, "official")
-  assert.equal(verified.command, null)
-  assert.match(verified.warning ?? "", /verified flow/)
-  assert.ok(verified.lines.some((line) => line.includes("unverified `spicetify-cli upgrade` self-updater is refused")))
-
+test("Spicetify guidance is official-installer-only for every owner (legacy migrates)", () => {
+  for (const owner of ["script", "winget", "scoop", "choco", "unknown"] as const) {
+    const guidance = spicetifyUpdateGuidance(owner)
+    assert.equal(guidance.category, "official")
+    assert.equal(guidance.command, null, `${owner}: no manager/upgrade command`)
+    assert.match(guidance.method, /official installer.*migrate/i, owner)
+    assert.ok(guidance.lines.some((line) => line.includes(SPICETIFY_MANUAL_URL)), owner)
+    assert.ok(guidance.lines.some((line) => /migrate to the official pipeline/i.test(line)), owner)
+    assert.ok(guidance.lines.some((line) => /Marketplace installs by default/i.test(line)), owner)
+    assert.ok(!guidance.lines.some((line) => /Only (winget|Scoop|Chocolatey) should update/i.test(line)), `${owner}: no manager-only line`)
+    assert.equal(guidance.warning, undefined, `${owner}: no refusal warning`)
+  }
+  // No winget/scoop/choco upgrade commands are ever emitted.
   const winget = spicetifyUpdateGuidance("winget")
-  assert.equal(winget.category, "manager")
-  assert.ok(winget.command?.includes(`winget upgrade --id ${SPICETIFY_WINGET_ID} -e`))
-  assert.ok(winget.lines.some((line) => line.includes("Only winget should update it")))
-
-  const scoop = spicetifyUpdateGuidance("scoop")
-  assert.equal(scoop.command, "scoop update spicetify-cli")
-  assert.equal(scoop.category, "manager")
-
-  const choco = spicetifyUpdateGuidance("choco")
-  assert.equal(choco.command, "choco upgrade spicetify-cli -y")
-  assert.equal(choco.category, "manager")
-
-  const unknown = spicetifyUpdateGuidance("unknown")
-  assert.equal(unknown.category, "unknown")
-  assert.equal(unknown.command, null)
-  assert.match(unknown.warning ?? "", /could not be determined/)
-  assert.ok(unknown.lines.some((line) => line.includes("Never run two package managers")))
+  assert.ok(!JSON.stringify(winget).includes(`winget upgrade --id ${SPICETIFY_WINGET_ID}`))
+  assert.ok(!JSON.stringify(winget).includes("scoop update"))
+  assert.ok(!JSON.stringify(winget).includes("choco upgrade"))
 })
 
 test("owner labels and guidance rendering are stable", () => {
   assert.equal(spicetifyOwnerCategory("script"), "official")
-  assert.equal(spicetifyOwnerCategory("winget"), "manager")
-  assert.equal(spicetifyOwnerCategory("scoop"), "manager")
-  assert.equal(spicetifyOwnerCategory("choco"), "manager")
-  assert.equal(spicetifyOwnerCategory("unknown"), "unknown")
+  assert.equal(spicetifyOwnerCategory("winget"), "official")
+  assert.equal(spicetifyOwnerCategory("scoop"), "official")
+  assert.equal(spicetifyOwnerCategory("choco"), "official")
+  assert.equal(spicetifyOwnerCategory("unknown"), "official")
   assert.equal(spicetifyOwnerLabel("script"), "official installer")
   assert.equal(spicetifyOwnerLabel("winget"), "winget")
   assert.equal(spicetifyOwnerLabel("scoop"), "Scoop")
@@ -572,8 +559,8 @@ test("owner labels and guidance rendering are stable", () => {
   renderSpicetifyGuidance(ui, spicetifyUpdateGuidance("scoop"))
   assert.ok(ui.lines.includes("Spicetify update guidance"))
   assert.ok(ui.lines.includes("Install owner: Scoop"))
-  assert.ok(ui.lines.includes("Upgrade method: Scoop (spicetify-cli)"))
-  assert.ok(ui.lines.includes("Command: scoop update spicetify-cli"))
+  assert.match(ui.lines.find((line) => line.startsWith("Upgrade method:")) ?? "", /official installer.*migrate/i)
+  assert.ok(!ui.lines.some((line) => line.startsWith("Command:")), "no manager command is rendered")
 })
 
 // ---------------------------------------------------------------------------
@@ -590,6 +577,7 @@ test("summary distinguishes updated, unchanged, applied, and pending outcomes", 
   assert.equal(updated.bridge, "synchronized and applied")
   assert.equal(updated.spicetify, "updated to 2.47.0 (winget)")
   assert.ok(updated.nextSteps.some((line) => line.includes("load the updated plugin")))
+  assert.ok(updated.nextSteps.some((line) => line.includes("opencode service restart")))
   assert.ok(updated.nextSteps.some((line) => line.includes("Playback is not verified")))
 
   const pending = createUpdateSummary({
@@ -612,6 +600,27 @@ test("summary distinguishes updated, unchanged, applied, and pending outcomes", 
   assert.equal(unchanged.bridge, "already current")
   assert.equal(unchanged.spicetify, "unchanged (2.47.0, winget)")
   assert.ok(unchanged.nextSteps.some((line) => line.includes("if the bridge was re-applied")))
+  assert.ok(unchanged.nextSteps.some((line) => line.includes("opencode service restart")))
+})
+
+test("overview and selection reflect the official-installer-only policy with Marketplace default", () => {
+  const ui = fakeUi()
+  renderUpdateOverview(ui, model(), { allowSpicetifyUpgrade: true })
+  const text = ui.lines.join("\n")
+  assert.match(text, /pinned official installer/i)
+  assert.match(text, /Marketplace installs by default/i)
+  assert.ok(!/winget upgrade --id/i.test(text), "no winget command")
+  assert.ok(!/scoop update/i.test(text), "no scoop command")
+  assert.ok(!/choco upgrade/i.test(text), "no choco command")
+
+  const unknownUi = fakeUi()
+  renderUpdateOverview(unknownUi, model({ spicetify: { status: "outdated", owner: "unknown" } }))
+  assert.match(unknownUi.lines.join("\n"), /pinned official installer/i)
+  assert.ok(!unknownUi.lines.some((line) => /no automatic upgrade will run/i.test(line)), "unknown is not refused")
+
+  const selUi = fakeUi()
+  renderUpdateSelection(selUi, model({ spicetify: { status: "outdated", owner: "unknown" } }))
+  assert.match(selUi.lines.join("\n"), /pinned official installer/i)
 })
 
 test("summary renders keys, warnings, and next steps", () => {

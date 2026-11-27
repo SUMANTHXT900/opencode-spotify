@@ -1,5 +1,6 @@
 import { BRIDGE_PORT, BRIDGE_PROTOCOL, MIN_OPENCODE, MIN_SPICETIFY } from "./compat.ts"
 import { compatibilityLabel } from "./plan.ts"
+import { inspectMarketplace } from "./marketplace.ts"
 import { resolvePluginChannels, pluginAvailableUpdate } from "./update-plan.ts"
 import {
   availableUpdate,
@@ -10,7 +11,7 @@ import {
   type AvailableUpdate,
   type DependencyReport,
 } from "./versions.ts"
-import type { InstallOwner, OperationContext } from "./types.ts"
+import type { InstallOwner, OperationContext, Runtime, SpicetifyInfo } from "./types.ts"
 
 export interface StatusRuntimeInfo {
   /** Diagnostics never open the bridge; registration is not a live connection. */
@@ -94,6 +95,10 @@ export interface StatusReport {
     protocol: number
     error?: string
   }
+  marketplace: {
+    installed: boolean
+    registered: boolean
+  }
   port: StatusPortInfo
   compatibility: {
     minimum: { opencode: string; spicetify: string }
@@ -146,6 +151,35 @@ function portInfo(d: OperationContext["detection"]): StatusPortInfo {
     loopback: "127.0.0.1",
     owner,
     conflict: d.port.busy && d.port.likelyOwnedByThisPlugin !== true,
+  }
+}
+
+export interface MarketplaceStatus {
+  installed: boolean
+  registered: boolean
+}
+
+/**
+ * Diagnostics view of Spicetify Marketplace state. Delegates to Agent 1's
+ * canonical `inspectMarketplace` (src/cli/marketplace.ts owns the
+ * installation/registration definition) and keeps only the two contract
+ * fields: extra inspection fields (dir, configPath) can carry user paths, so
+ * they stay out of the `--json` report. Strictly read-only: the inspection
+ * itself only probes exists/isFile/readText, never runs commands, never
+ * touches the network, never writes.
+ */
+export function readMarketplaceStatus(
+  runtime: Runtime,
+  spicetify?: Pick<SpicetifyInfo, "configPath"> | null,
+): MarketplaceStatus {
+  try {
+    const inspection = inspectMarketplace(runtime, spicetify)
+    return {
+      installed: inspection.installed === true,
+      registered: inspection.registered === true,
+    }
+  } catch {
+    return { installed: false, registered: false }
   }
 }
 
@@ -224,6 +258,7 @@ export function statusReport(ctx: OperationContext): StatusReport {
       protocol: BRIDGE_PROTOCOL,
       ...(d.bridge.error ? { error: redactSensitive(d.bridge.error) } : {}),
     },
+    marketplace: readMarketplaceStatus(ctx.runtime, d.spicetify),
     port: portInfo(d),
     compatibility: {
       minimum: { opencode: MIN_OPENCODE, spicetify: MIN_SPICETIFY },
@@ -297,6 +332,9 @@ export async function runStatus(ctx: OperationContext): Promise<number> {
   ctx.ui.kv("Bridge", report.bridge.installed
     ? `installed; registration ${report.bridge.registration}`
     : report.bridge.credentialFile ? "configured; extension missing" : "not installed")
+  ctx.ui.kv("Marketplace", report.marketplace.installed
+    ? (report.marketplace.registered ? "installed; registered" : "installed; not registered")
+    : "not installed")
   ctx.ui.kv("Bridge protocol", `${report.bridge.protocol}`)
   ctx.ui.kv("Credentials", report.bridge.credentialValid
     ? "valid shape (values are never displayed)"

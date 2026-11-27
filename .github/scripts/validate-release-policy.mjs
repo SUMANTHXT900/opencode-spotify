@@ -14,6 +14,16 @@
  *   publish       - validate version/channel/ref/branch types, canonical
  *                   digests, confirm == PUBLISH, numeric prepare run ID !=
  *                   current, and the NPM_PUBLISH_ENABLED kill switch.
+ *   tag-release   - derive the release version and dist-tag from a pushed
+ *                   git tag. Requires REF_TYPE == "tag" and TAG_NAME of the
+ *                   form v<strict-semver> (leading v stripped). Only stable
+ *                   (X.Y.Z) or -beta.N prereleases are accepted. The stripped
+ *                   version must exactly equal plugin/package.json. The
+ *                   dist-tag is derived deterministically (beta when the
+ *                   version has a prerelease suffix, latest when stable) and
+ *                   emitted as clean `version=<v>` / `dist_tag=<tag>` lines;
+ *                   when GITHUB_OUTPUT is set both lines are appended to it
+ *                   so a validate job can expose them as step outputs.
  *   write-proof   - verify the retained candidate dir and write proof.json.
  *   recheck       - verify a downloaded candidate against QA attestation
  *                   inputs, including proof run_id / repository / verifier.
@@ -346,6 +356,47 @@ function compareSemver(a, b) {
   return 0;
 }
 
+function doTagRelease() {
+  const refType = need("REF_TYPE");
+  let tagName = needOpt("TAG_NAME");
+  if (!tagName) tagName = needOpt("REF_NAME");
+  if (!tagName) fail("missing required env TAG_NAME");
+  if (refType !== "tag") {
+    fail(`refusing tag-release: REF_TYPE is '${sanitize(refType)}', want 'tag' (push a version tag)`);
+  }
+  if (!tagName.startsWith("v")) {
+    fail(`tag name '${sanitize(tagName)}' must start with 'v' followed by strict semver (e.g. v0.6.0 or v0.6.0-beta.4)`);
+  }
+  const version = tagName.slice(1);
+  checkStrictSemver(version, "tag version");
+  if (version.includes("-")) {
+    const pre = version.slice(version.indexOf("-") + 1);
+    if (!/^beta\.(0|[1-9]\d*)$/.test(pre)) {
+      fail(
+        `tag prerelease '${sanitize(pre)}' is not an accepted prerelease (only -beta.N tags publish; stable tags publish to latest)`,
+      );
+    }
+  }
+  const pkgVersion = readManifestVersion();
+  if (pkgVersion !== version) {
+    fail(
+      `tag version '${sanitize(version)}' does not match plugin/package.json '${sanitize(pkgVersion)}'`,
+    );
+  }
+  const channel = version.includes("-") ? "beta" : "latest";
+  const lines = `version=${version}\ndist_tag=${channel}\n`;
+  const githubOutput = process.env.GITHUB_OUTPUT ?? "";
+  if (/[\r\n]/.test(githubOutput)) fail("GITHUB_OUTPUT must be single-line");
+  if (githubOutput) {
+    try {
+      writeFileSync(githubOutput, lines, { flag: "a" });
+    } catch {
+      fail("cannot append tag-release outputs to GITHUB_OUTPUT");
+    }
+  }
+  process.stdout.write(lines);
+}
+
 function doTagPreflight() {
   const version = need("INPUT_VERSION");
   const channel = need("INPUT_DIST_TAG");
@@ -377,10 +428,11 @@ if (mode === "prepare") doPrepare();
 else if (mode === "publish") doPublish();
 else if (mode === "write-proof") doWriteProof();
 else if (mode === "recheck") doRecheck();
+else if (mode === "tag-release") doTagRelease();
 else if (mode === "tag-preflight") doTagPreflight();
 else {
   process.stderr.write(
-    `release-policy: unknown mode ${sanitize(mode)} (want prepare|publish|write-proof|recheck|tag-preflight)\n`,
+    `release-policy: unknown mode ${sanitize(mode)} (want prepare|publish|write-proof|recheck|tag-release|tag-preflight)\n`,
   );
   process.exit(1);
 }

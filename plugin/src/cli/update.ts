@@ -1,16 +1,16 @@
 // Update workflow (B09).
 //
-// Update is deliberately channel-aware and ownership-aware:
+// Update is deliberately channel-aware and official-installer-only:
 //   * installed vs target versions come from update-plan.ts (single source of
 //     truth); an older registry tag is never advertised as an update and no
 //     workflow ever downgrades or moves a stable install onto beta;
-//   * the Spicetify route is chosen from the detected owner and the achievable
-//     target for that owner; a target is only considered when the published
+//   * every installed Spicetify copy (script, winget, scoop, choco, unknown)
+//     updates through the pinned official installer to the latest stable
+//     GitHub release (legacy-to-official migration; no second copy, no
+//     manager mixing); a target is only considered when the published
 //     version is a strict stable release;
-//   * a manager-owned Spicetify (winget/scoop/choco) is updated through that
-//     owner's manager only, never by installing a second copy;
-//   * an unknown owner is refused for an explicitly requested Spicetify update,
-//     and skipped (with a warning) when the plugin update can still proceed.
+//   * unknown owners are no longer refused or skipped: they migrate to the
+//     official pipeline like every other owner.
 //
 // The owned bridge is synchronized to the selected plugin version while
 // reusing valid credentials, and the known broken beta.2 bridge is repaired
@@ -25,6 +25,12 @@ import { bridgeOperation } from "./bridge.ts"
 import { upgradeSpicetify } from "./spicetify-official.ts"
 import type { OfficialInstallerApproval, OfficialUpgradeOptions } from "./spicetify-official.ts"
 import { OperationCancelled } from "./cancel.ts"
+import type { CancelToken } from "./cancel.ts"
+// Agent 1 owns src/cli/marketplace.ts. Import its contract types (do not
+// redefine them here); the runtime load is dynamic with a soft-fail fallback.
+// @ts-ignore – resolves once Agent 1's marketplace module lands.
+import type * as MarketplaceContract from "./marketplace.ts"
+import { sanitizeDetail } from "./runtime.ts"
 import {
   announcePlan,
   cancelAwareRuntime,
@@ -51,7 +57,7 @@ import {
   type UpdateViewModel,
 } from "./ui/update-view.ts"
 import { PLAN_MESSAGES, sanitizeMessage } from "./state.ts"
-import type { InstallOwner, OperationContext, PlanStep, SpicetifyInfo } from "./types.ts"
+import type { CommandResult, InstallOwner, OperationContext, PlanStep, SpicetifyInfo } from "./types.ts"
 
 /**
  * Forward a progress line to the structured reporter when one is attached,
@@ -73,17 +79,11 @@ function reportProgressLine(ctx: OperationContext, scope: string, line: string):
 
 export type UpdateChoice = "auto" | "plugin" | "both" | "spicetify"
 
-/** Owner-derived Spicetify update route. "official" is the script installer. */
+/** Owner-derived Spicetify update route. Always "official": every owner migrates to the pinned installer. */
 export type SpicetifyUpdateMethod = "official" | "winget" | "scoop" | "choco" | "unsupported"
 
-export function spicetifyUpdateMethod(owner: InstallOwner): SpicetifyUpdateMethod {
-  switch (owner) {
-    case "script": return "official"
-    case "winget": return "winget"
-    case "scoop": return "scoop"
-    case "choco": return "choco"
-    default: return "unsupported"
-  }
+export function spicetifyUpdateMethod(_owner: InstallOwner): SpicetifyUpdateMethod {
+  return "official"
 }
 
 const STRICT_STABLE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
@@ -98,28 +98,17 @@ export function stableSpicetifyVersion(value: string | null | undefined): string
 }
 
 /**
- * The version an owner-safe upgrade can actually install. Only a strict stable
- * published version may be advertised; anything else yields no target rather
- * than an invented one.
+ * The version an official-pipeline upgrade can actually install. Only a strict
+ * stable published version may be advertised; anything else yields no target
+ * rather than an invented one. The method is always official (legacy callers
+ * may still pass a manager method; it is ignored).
  */
-export function spicetifyUpdateTarget(method: SpicetifyUpdateMethod, latest: string | null): string | null {
-  if (method === "unsupported") return null
+export function spicetifyUpdateTarget(_method: SpicetifyUpdateMethod, latest: string | null): string | null {
   return stableSpicetifyVersion(latest)
 }
 
-export function spicetifyUpdateDescription(owner: InstallOwner): string {
-  switch (spicetifyUpdateMethod(owner)) {
-    case "official":
-      return "Upgrade Spicetify through its official installer/update pipeline (script-owned install; no second copy)"
-    case "winget":
-      return "Upgrade Spicetify through Winget (Spicetify.Spicetify owner package; no second copy)"
-    case "scoop":
-      return "Upgrade Spicetify through Scoop (owner package; no second copy)"
-    case "choco":
-      return "Upgrade Spicetify through Chocolatey (owner package; no second copy)"
-    default:
-      return "Spicetify owner is unknown; owner-safe update is not possible"
-  }
+export function spicetifyUpdateDescription(_owner: InstallOwner): string {
+  return "Upgrade Spicetify through its pinned official installer to the latest stable release (legacy manager copies migrate to official; no second copy)"
 }
 
 export type SpicetifyGateStatus =
@@ -144,8 +133,10 @@ export interface SpicetifyUpdateGate {
 }
 
 /**
- * Gate a Spicetify update from the achievable target and the detected owner.
- * A missing or prerelease published version never turns into "current".
+ * Gate a Spicetify update from the achievable target. Every owner (including
+ * unknown and legacy manager copies) routes through the pinned official
+ * installer to the latest stable release. A missing or prerelease published
+ * version never turns into "current".
  */
 export function spicetifyUpdateGate(input: {
   installed: string | null
@@ -164,21 +155,14 @@ export function spicetifyUpdateGate(input: {
   if (!input.installed) {
     return { ...base, status: "not-installed", message: "Spicetify is not detected; run `opencode-spotify setup` instead." }
   }
-  if (method === "unsupported") {
-    return {
-      ...base,
-      status: "unsupported-owner",
-      message: "The Spicetify installation owner is unknown. Refusing to update it: an owner-safe update cannot be selected and a second copy would be unsafe.",
-    }
-  }
   if (!achievable) {
     const published = (input.latest ?? "").trim()
     return {
       ...base,
       status: "unknown",
       message: published
-        ? `The published Spicetify version ${sanitizeMessage(published)} is not a strict stable release, so no owner-safe update target is available.`
-        : "The latest Spicetify version could not be determined, so no owner-safe update target is available.",
+        ? `The published Spicetify version ${sanitizeMessage(published)} is not a strict stable release, so no official-installer update target is available.`
+        : "The latest Spicetify version could not be determined, so no official-installer update target is available.",
     }
   }
   const compared = compareVersions(achievable, input.installed)
@@ -191,7 +175,7 @@ export function spicetifyUpdateGate(input: {
       message: `The available Spicetify ${achievable} is older than installed ${input.installed}; downgrades are never automatic.`,
     }
   }
-  return { ...base, status: "unknown", message: "Spicetify versions could not be compared, so no owner-safe update will run." }
+  return { ...base, status: "unknown", message: "Spicetify versions could not be compared, so no official-installer update will run." }
 }
 
 function gateAvailability(status: SpicetifyGateStatus): UpdateAvailability["spicetify"] {
@@ -222,14 +206,109 @@ async function verifyVersion(ctx: OperationContext, expected: string): Promise<b
 }
 
 /**
- * One Spicetify update step. The route is chosen from the detected owner:
- * official pipeline for script installs, the owner's manager otherwise.
- * Unknown owners never reach this step (refused or skipped while planning).
+ * Test seams for update (no network in tests). The Spicetify upgrade seam
+ * lets fakes stand in for the interactive official installer; the
+ * Marketplace seams mirror setup.ts and default to the dynamic
+ * `import("./marketplace.ts")` contract with soft-fail isolation.
+ */
+export interface UpdateDeps {
+  upgradeSpicetify?: (
+    runtime: OperationContext["runtime"],
+    info: SpicetifyInfo,
+    options: OfficialUpgradeOptions,
+  ) => Promise<CommandResult>
+  inspectMarketplace?: (
+    runtime: OperationContext["runtime"],
+    spicetify: SpicetifyInfo,
+  ) => Promise<{ installed: boolean; registered: boolean }> | { installed: boolean; registered: boolean }
+  installMarketplace?: (
+    runtime: OperationContext["runtime"],
+    spicetify: SpicetifyInfo,
+    options?: { dryRun?: boolean; offline?: boolean; cancel?: CancelToken },
+  ) => Promise<{ status: "already-installed" | "installed" | "dry-run" | "skipped-offline" | "failed"; error?: string; guidance?: string }>
+    | { status: "already-installed" | "installed" | "dry-run" | "skipped-offline" | "failed"; error?: string; guidance?: string }
+}
+
+/**
+ * Ensure the Marketplace after a Spicetify upgrade and before `spicetify
+ * apply` (installed by default; opt out with `--no-marketplace`). Soft-fail:
+ * warnings continue, never a failure. `dryRun`/`offline` flow through.
+ */
+export async function ensureMarketplaceAfterUpgrade(
+  ctx: OperationContext,
+  deps: Pick<UpdateDeps, "inspectMarketplace" | "installMarketplace"> = {},
+): Promise<void> {
+  if (ctx.options.marketplace === false) return
+  if (ctx.cancel.requested) return
+  if (!ctx.detection.spicetify.available) return
+  const runtime = cancelAwareRuntime(ctx.runtime, ctx.cancel)
+  const spicetify = ctx.detection.spicetify
+  try {
+    const inspect = deps.inspectMarketplace ?? (await loadUpdateMarketplace())?.inspectMarketplace
+    if (inspect) {
+      try {
+        const state = await inspect(runtime, spicetify)
+        if (state && (state as { installed?: boolean }).installed === true &&
+          (state as { registered?: boolean }).registered === true) {
+          return
+        }
+      } catch (error) {
+        ctx.ui.warn(`Marketplace inspection failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+        return
+      }
+    }
+    const install = deps.installMarketplace ?? (await loadUpdateMarketplace())?.installMarketplace
+    if (!install) {
+      ctx.ui.warn("Spicetify Marketplace is not installed (marketplace module unavailable); continuing without it.")
+      return
+    }
+    let result: { status: string; error?: string; guidance?: string }
+    try {
+      result = await install(runtime, spicetify, {
+        dryRun: ctx.options.dryRun,
+        offline: ctx.options.offline,
+        cancel: ctx.cancel,
+      })
+    } catch (error) {
+      ctx.ui.warn(`Marketplace installation failed; continuing without it. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+      return
+    }
+    if (result.status === "failed") {
+      const detail = result.error ? ` Detail: ${sanitizeDetail(result.error)}` : ""
+      const guidance = result.guidance ? ` ${result.guidance}` : ""
+      ctx.ui.warn(`Marketplace installation failed; continuing without it.${detail}${guidance}`)
+    }
+  } catch (error) {
+    ctx.ui.warn(`Marketplace setup was skipped; continuing. Detail: ${sanitizeDetail(error instanceof Error ? error.message : "unknown error")}`)
+  }
+}
+
+async function loadUpdateMarketplace(): Promise<{
+  inspectMarketplace?: UpdateDeps["inspectMarketplace"]
+  installMarketplace?: UpdateDeps["installMarketplace"]
+} | null> {
+  try {
+    // @ts-ignore – Agent 1 owns marketplace.ts; resolves once that module lands.
+    const mod = await import("./marketplace.ts") as {
+      inspectMarketplace?: UpdateDeps["inspectMarketplace"]
+      installMarketplace?: UpdateDeps["installMarketplace"]
+    }
+    if (!mod || (typeof mod.inspectMarketplace !== "function" && typeof mod.installMarketplace !== "function")) return null
+    return mod
+  } catch {
+    return null
+  }
+}
+
+/**
+ * One Spicetify update step. Every owner (including legacy manager and
+ * unknown copies) migrates through the pinned official installer pipeline;
+ * managers are never invoked and no second copy is installed.
  *
  * The plan screen already obtained consent, so the approval callback only
  * displays the exact route details; it never asks a second time.
  */
-async function spicetifyUpdateStep(ctx: OperationContext): Promise<PlanStep> {
+async function spicetifyUpdateStep(ctx: OperationContext, deps: UpdateDeps = {}): Promise<PlanStep> {
   return {
     id: "upgrade-spicetify",
     description: spicetifyUpdateDescription(ctx.detection.spicetify.owner),
@@ -249,9 +328,8 @@ async function spicetifyUpdateStep(ctx: OperationContext): Promise<PlanStep> {
         afterInteractive: async () => { await ctx.ui.resume?.() },
         approve: async (details: OfficialInstallerApproval) => {
           ctx.ui.section("Spicetify upgrade plan")
-          ctx.ui.kv("Method", details.method)
+          ctx.ui.kv("Method", "official installer (legacy copies migrate; no second copy)")
           ctx.ui.kv("Source", details.source)
-          if (details.command) ctx.ui.kv("Command", details.command)
           if (details.scriptUrl) ctx.ui.kv("Script", details.scriptUrl)
           if (details.scriptSha256) ctx.ui.kv("SHA-256", details.scriptSha256)
           for (const warning of details.warnings ?? []) ctx.ui.warn(warning)
@@ -260,9 +338,14 @@ async function spicetifyUpdateStep(ctx: OperationContext): Promise<PlanStep> {
           return true
         },
       }
-      const result = await upgradeSpicetify(
+      // Legacy manager copies migrate: force the official pipeline even when
+      // detection reports winget/scoop/choco/unknown. The official installer
+      // owns the target from here on; managers are never invoked.
+      const officialInfo: SpicetifyInfo = { ...ctx.detection.spicetify, owner: "script" }
+      const upgrade = deps.upgradeSpicetify ?? upgradeSpicetify
+      const result = await upgrade(
         cancelAwareRuntime(ctx.runtime, ctx.cancel),
-        ctx.detection.spicetify,
+        officialInfo,
         options,
       )
       if (result.cancelled) throw new OperationCancelled("upgrade-spicetify", "Spicetify upgrade cancelled")
@@ -302,28 +385,24 @@ function updateModel(
 }
 
 /**
- * Show the owner-specific guidance. The C17 official-installer line still
- * mentions `spicetify upgrade`; B05 retired that self-updater, so the official
- * branch is rendered with the owner-safe pipeline description instead.
+ * Show the official-installer-only guidance. All owners (including legacy
+ * manager copies and unknown) migrate through the pinned official installer;
+ * manager commands are never shown and no owner is refused.
  */
 function renderOwnerGuidance(ctx: OperationContext): void {
   const owner = ctx.detection.spicetify.owner
   const guidance = spicetifyUpdateGuidance(owner, { verifiedInstall: false })
-  if (guidance.category === "official") {
-    renderSpicetifyGuidance(ctx.ui, {
-      ...guidance,
-      method: spicetifyUpdateDescription(owner),
-      command: null,
-      lines: [
-        "This installation is owned by the official Spicetify installer.",
-        "Update it through the official installer pipeline only; do not also run winget, Scoop or Chocolatey against it.",
-        ...guidance.lines.filter((line) => line.startsWith("Docs:")),
-      ],
-      warning: undefined,
-    })
-    return
-  }
-  renderSpicetifyGuidance(ctx.ui, guidance)
+  renderSpicetifyGuidance(ctx.ui, {
+    ...guidance,
+    method: spicetifyUpdateDescription(owner),
+    command: null,
+    lines: [
+      "Every Spicetify copy updates through the pinned official installer to the latest stable release.",
+      "Legacy manager copies (winget/Scoop/Chocolatey) migrate to the official pipeline; no second copy is installed and managers are not mixed.",
+      ...guidance.lines.filter((line) => line.startsWith("Docs:")),
+    ],
+    warning: undefined,
+  })
 }
 
 /**
@@ -403,11 +482,11 @@ export function installerUpdateTarget(
 }
 
 /**
- * The update (optionally with an owner-safe Spicetify CLI upgrade first)
- * and its owned bridge. Never downgrades, never replaces a local development
- * plugin, and never lets an update switch channels.
+ * The update (optionally with an official-installer Spicetify CLI upgrade
+ * first) and its owned bridge. Never downgrades, never replaces a local
+ * development plugin, and never lets an update switch channels.
  */
-export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "auto"): Promise<number> {
+export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "auto", deps: UpdateDeps = {}): Promise<number> {
   const { ui, detection } = ctx
   if (ctx.cancel.requested) {
     ctx.cancel.settle("cancelled")
@@ -461,8 +540,9 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
 
   const pluginOutdated = latest !== null
   const spicetifyInstalled = detection.spicetify.version
-  // Achievable target + owner. A non-stable/unavailable published version is
-  // never treated as an update, and never reported as "current".
+  // Achievable official-installer target. A non-stable/unavailable published
+  // version is never treated as an update, and never reported as "current".
+  // Every owner (including unknown/legacy manager copies) migrates to official.
   const spicetifyGate = spicetifyUpdateGate({
     installed: spicetifyInstalled,
     owner: detection.spicetify.owner,
@@ -554,7 +634,7 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
       return 1
     } else {
       // A combined update must still update the plugin: skip Spicetify only.
-      ui.warn(`Skipping the Spicetify update. ${spicetifyGate.message ?? "No owner-safe update target is available."}`)
+      ui.warn(`Skipping the Spicetify update. ${spicetifyGate.message ?? "No official-installer update target is available."}`)
     }
     spicetifySelected = false
   }
@@ -562,11 +642,6 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
   if (spicetifySelected) {
     if (!spicetifyInstalled) {
       ui.error("Spicetify is not detected; run `opencode-spotify setup` instead.")
-      return 1
-    }
-    if (spicetifyGate.method === "unsupported") {
-      ui.error("The Spicetify installation owner is unknown. Refusing to update it: an owner-safe update cannot be selected and a second copy would be unsafe.")
-      ui.bullet("Reinstall Spicetify once with a supported owner (Winget, Scoop, Chocolatey, or the official installer), then retry.")
       return 1
     }
     if (!ctx.options.allowSpicetifyUpgrade) {
@@ -580,7 +655,7 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
         spicetifySelected = false
       } else {
         const confirmSpicetify = await ctx.prompt.confirm(
-          `Spicetify is owned by ${detection.spicetify.owner}. Update it with ${spicetifyGate.method === "official" ? "the official pipeline" : `the ${spicetifyGate.method} manager`} (${spicetifyInstalled} -> ${spicetifyGate.target})?`,
+          `Update Spicetify through the pinned official installer (legacy ${detection.spicetify.owner} copy migrates; no second copy) (${spicetifyInstalled} -> ${spicetifyGate.target})?`,
           { defaultYes: false },
         )
         if (!confirmSpicetify) {
@@ -603,10 +678,12 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
   // ---- spicetify-only path -------------------------------------------------
   if (spicetifySelected && !pluginSelected) {
     ui.section("Spicetify update (separate authorization)")
-    const upgradeCode = await presentAndRunPlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx)])
+    const upgradeCode = await presentAndRunPlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx, deps)])
     if (upgradeCode !== 0) return upgradeCode
     if (ctx.options.dryRun) return 0
     await verifySpicetify(ctx)
+    // Marketplace installs by default after the upgrade and before apply.
+    await ensureMarketplaceAfterUpgrade(ctx, deps)
 
     const bridgeWasNeeded = bridgeNeedsRepair(ctx)
     if (bridgeWasNeeded) {
@@ -633,7 +710,7 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
         applied: applied.applied,
         pending: !applied.applied,
       },
-      nextSteps: ["Restart running OpenCode processes if the bridge was re-applied.", "Playback is not verified by this command."],
+      nextSteps: ["Restart running OpenCode processes if the bridge was re-applied (or run `opencode service restart`).", "Playback is not verified by this command."],
     }))
     return 0
   }
@@ -641,10 +718,12 @@ export async function runUpdate(ctx: OperationContext, choice: UpdateChoice = "a
   // ---- combined Spicetify upgrade first ------------------------------------
   if (spicetifySelected) {
     ui.section("Spicetify update (separate authorization)")
-    const code = await presentAndRunPlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx)])
+    const code = await presentAndRunPlan(ctx, "Upgrade Spicetify CLI", [await spicetifyUpdateStep(ctx, deps)])
     if (code !== 0) return code
     if (ctx.options.dryRun) return 0
     await verifySpicetify(ctx)
+    // Marketplace installs by default after the upgrade and before apply.
+    await ensureMarketplaceAfterUpgrade(ctx, deps)
   }
 
   // ---- plugin + bridge plan ------------------------------------------------
